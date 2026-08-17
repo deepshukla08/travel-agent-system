@@ -1,71 +1,70 @@
 /**
- * Evaluates extracted preferences and decides if the user has provided
- * enough information to build a useful travel plan.
+ * Decides whether a request is too vague to act on.
  *
- * Critical fields: destination, numberOfDays, budgetLevel, travelers
- * If 2 or more critical fields are missing → ask the user before proceeding.
+ * Deliberately narrow. A missing destination is NOT a blocker any more — that
+ * is the Destination Agent's job, and asking "where do you want to go?" when the
+ * user said "somewhere warm in Europe" would skip the agent that exists to
+ * answer exactly that.
+ *
+ * Only two things genuinely block planning: not knowing how long the trip is,
+ * and having neither a destination nor any constraint to choose one from.
  */
 
-const CRITICAL_QUESTIONS = [
-  {
-    field: "destination",
-    missing: (p) => !p.destination,
-    question:
-      "🗺️  **Where** would you like to travel? (city, country, or region)",
-  },
+const BLOCKERS = [
   {
     field: "numberOfDays",
     missing: (p) => !p.numberOfDays,
     question: "📅  **How many days** is your trip?",
   },
   {
-    field: "startDate",
+    field: "destinationOrConstraints",
+    // A destination OR something to pick one from is enough to proceed.
+    missing: (p) =>
+      !p.destination && (p.hardConstraints ?? []).length === 0,
+    question:
+      "🗺️  **Where would you like to go**, or what kind of place? (a city, a region, or just 'somewhere warm and walkable')",
+  },
+];
+
+/** Asked alongside a blocker, so the user answers everything in one go. */
+const NICE_TO_HAVE = [
+  {
     missing: (p) => !p.startDate,
     question:
-      "🗓️  **When are you planning to travel?** (e.g. June 15, next month, 2026-07-01)",
+      "🗓️  **When are you travelling?** (a date or month is fine — otherwise I'll assume a few weeks out)",
   },
   {
-    field: "budgetLevel",
-    missing: (p) => !p.budgetLevel,
+    missing: (p) => !p.budgetAmount && !p.budgetLevel,
     question:
-      "💰  **What is your budget level?** (budget / mid-range / luxury, or an approximate amount)",
+      "💰  **What's your budget?** (a total amount, or just budget / mid-range / luxury)",
   },
   {
-    field: "travelers",
     missing: (p) => !p.travelers || p.travelers === "unknown",
     question:
-      "👥  **How many people** are traveling, and what is the group type? (solo, couple, family of 4, group of friends, etc.)",
-  },
-  {
-    field: "travelStyle",
-    missing: (p) => !p.travelStyle,
-    question:
-      "🎯  **What type of trip** are you looking for? (relaxed sightseeing, adventure, beach, cultural, honeymoon, etc.)",
+      "👥  **Who's travelling?** (solo, couple, family of 4, group of friends...)",
   },
 ];
 
 /**
- * @param {object} preferences - Output from the Preference Agent
+ * @param {object} preferences - structured output from the preference step
  * @returns {{ needsClarification: boolean, questions: string[], message: string|null }}
  */
 export function checkClarificationNeeded(preferences = {}) {
-  const missingCritical = CRITICAL_QUESTIONS.filter((q) =>
-    q.missing(preferences),
-  );
+  const blocking = BLOCKERS.filter((q) => q.missing(preferences));
 
-  // Require clarification when 2 or more critical fields are missing
-  const needsClarification = missingCritical.length >= 2;
-
-  if (!needsClarification) {
+  if (blocking.length === 0) {
     return { needsClarification: false, questions: [], message: null };
   }
 
-  const questions = missingCritical.map((q) => q.question);
+  const questions = [
+    ...blocking.map((q) => q.question),
+    ...NICE_TO_HAVE.filter((q) => q.missing(preferences)).map((q) => q.question),
+  ];
 
   const message =
-    `I'd love to help plan your trip! I just need a few more details to create the perfect plan:\n\n` +
+    `I'd love to help plan your trip! I just need a little more to go on:\n\n` +
     questions.join("\n\n") +
-    `\n\nPlease answer the questions above and I'll start building your itinerary right away! 🚀`;
+    `\n\nAnswer what you can and I'll start building your plan. 🚀`;
 
   return { needsClarification: true, questions, message };
 }

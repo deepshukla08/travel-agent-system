@@ -6,19 +6,17 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
   },
   "dependencies": {
-    "@langchain/anthropic": "^0.3.0",
-    "@langchain/community": "^1.1.28",
     "@langchain/core": "^0.3.0",
+    "@langchain/google-genai": "^0.2.18",
     "@langchain/langgraph": "^0.2.0",
-    "@langchain/openai": "^0.3.0",
     "cors": "^2.8.6",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
     "mongoose": "^9.6.1",
-    "uuid": "^14.0.0",
     "zod": "^3.23.8"
   }
 }

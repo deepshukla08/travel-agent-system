@@ -1,12 +1,14 @@
-﻿import { Router } from "express";
+import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import { Command } from "@langchain/langgraph";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { Session } from "../db/models/Session.js";
 import { Plan } from "../db/models/Plan.js";
+import { AgentRun } from "../db/models/AgentRun.js";
 import { logger } from "../utils/logger.js";
 import { travelGraph } from "../graph/travelGraph.js";
 import { emitterStorage } from "../utils/emitter.js";
-import { getLLM } from "../utils/llm.js";
+import { getLLM, callLLM, normaliseContent } from "../utils/llm.js";
 
 const router = Router();
 
@@ -15,50 +17,43 @@ function sseWrite(res, type, data) {
   res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-/** Set SSE response headers */
-function setupSSE(req, res) {
+function setupSSE(res) {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("X-Accel-Buffering", "no"); // stop proxies buffering the stream
   res.flushHeaders();
 }
 
 /**
- * Stream the travel graph for a given thread, forwarding agent events to SSE.
+ * Stream the travel graph, forwarding agent events to SSE.
  *
- * `input` is either:
- *   - an initial state object  { userRequest, errors: [] }   for new runs
- *   - Command({ resume: answer })                             to resume after interrupt
+ * `input` is either an initial state object for a new run, or
+ * Command({ resume }) to continue a run paused at interrupt().
  *
- * Agents emit their own agent_start / agent_done events via emitterStorage
- * (AsyncLocalStorage), which are piped directly to the SSE response â€” no
- * manual per-node wrapping needed.
- *
- * Returns:
- *   { interrupted: true,  message }       â€” graph paused; clarification needed
- *   { interrupted: false, finalState }    â€” graph completed normally
+ * Returns { interrupted: true, message } or { interrupted: false, finalState }.
  */
 async function streamGraphWithSSE(res, input, threadId) {
   const graphConfig = { configurable: { thread_id: threadId } };
-  const streamConfig = { ...graphConfig, streamMode: "updates" };
 
   let interruptMessage = null;
 
-  // Run the graph stream inside the emitterStorage context so that every
-  // emit() call inside an agent reaches the SSE response for this request.
+  // Agents call emit() with no HTTP knowledge; AsyncLocalStorage carries the
+  // writer for this request down to them.
   await emitterStorage.run(
     (type, data) => sseWrite(res, type, data),
     async () => {
-      const stream = await travelGraph.stream(input, streamConfig);
+      const stream = await travelGraph.stream(input, {
+        ...graphConfig,
+        streamMode: "updates",
+      });
+
       for await (const chunk of stream) {
         if ("__interrupt__" in chunk) {
-          // LangGraph paused at interrupt() â€” surface the clarification message
           interruptMessage =
             chunk.__interrupt__[0]?.value ?? "More details needed.";
-          return; // Stop consuming the stream; graph state is saved in MemorySaver
+          return; // state is held by the checkpointer
         }
-        // Normal node completion â€” agents have already emitted agent_start / agent_done
       }
     },
   );
@@ -67,14 +62,69 @@ async function streamGraphWithSSE(res, input, threadId) {
     return { interrupted: true, message: interruptMessage };
   }
 
-  // Stream finished â€” retrieve final accumulated state from the checkpointer
   const { values: finalState } = await travelGraph.getState(graphConfig);
   return { interrupted: false, finalState };
 }
 
 /**
+ * Persist a completed run and emit the terminal SSE frame.
+ *
+ * Shared by /plan, /clarify and /followup so all three record the same audit
+ * fields — attribution that only some endpoints wrote would be a broken trail.
+ */
+async function finishRun({ res, session, runId, userRequest, finalState }) {
+  const contributors = finalState.contributors ?? [];
+
+  session.messages.push({
+    role: "assistant",
+    content: finalState.finalPlan,
+    contributors,
+  });
+  await session.save();
+
+  const plan = await Plan.create({
+    runId,
+    sessionId: session._id,
+    userRequest,
+    route: finalState.route ?? [],
+    contributors,
+    preferences: finalState.preferences,
+    destination: finalState.destination,
+    itinerary: finalState.itinerary,
+    budget: finalState.budget,
+    finalPlan: finalState.finalPlan,
+    budgetFlagged: finalState.budget?.withinBudget === false,
+    runErrors: finalState.errors ?? [],
+  });
+
+  sseWrite(res, "done", {
+    sessionId: session._id,
+    planId: plan._id,
+    runId,
+    finalPlan: finalState.finalPlan,
+    contributors,
+    route: finalState.route ?? [],
+    budget: finalState.budget ?? null,
+    itinerary: finalState.itinerary ?? null,
+    destination: finalState.destination ?? null,
+    errors: finalState.errors ?? [],
+  });
+  res.end();
+}
+
+/** SSE has already sent 200 + headers, so errors must go down the stream. */
+function failStream(res, err, next) {
+  logger.error(err.message);
+  if (res.headersSent) {
+    sseWrite(res, "error", { message: err.message });
+    res.end();
+    return;
+  }
+  next(err);
+}
+
+/**
  * POST /api/travel/plan
- * Start a new travel planning session â€” streams progress via SSE.
  * Body: { userRequest: string }
  */
 router.post("/plan", async (req, res, next) => {
@@ -87,65 +137,49 @@ router.post("/plan", async (req, res, next) => {
     const session = await Session.create({
       messages: [{ role: "user", content: userRequest }],
     });
-    logger.info(`New session ${session._id}: "${userRequest}"`);
+    const runId = randomUUID();
 
-    setupSSE(req, res);
-    sseWrite(res, "start", { message: "Graph started", userRequest });
+    logger.graphStart(userRequest);
+    setupSSE(res);
+    sseWrite(res, "start", { message: "Planning started", userRequest, runId });
 
-    // thread_id = session._id so that /clarify can resume the SAME graph thread
+    // thread_id = session id so /clarify can resume this exact graph thread
     const result = await streamGraphWithSSE(
       res,
-      { userRequest, errors: [] },
+      {
+        userRequest,
+        runId,
+        sessionId: session._id.toString(),
+        errors: [],
+      },
       session._id.toString(),
     );
 
     if (result.interrupted) {
-      // Graph paused â€” ask user for more details
       session.awaitingClarification = true;
       await session.save();
-
       sseWrite(res, "clarify", {
         sessionId: session._id,
         message: result.message,
       });
-      res.end();
-      return;
+      return res.end();
     }
 
-    const { finalState } = result;
-    session.messages.push({ role: "assistant", content: finalState.finalPlan });
-    await session.save();
-
-    const plan = await Plan.create({
-      sessionId: session._id,
+    await finishRun({
+      res,
+      session,
+      runId,
       userRequest,
-      finalPlan: finalState.finalPlan,
-      fullState: finalState,
+      finalState: result.finalState,
     });
-
-    sseWrite(res, "done", {
-      sessionId: session._id,
-      planId: plan._id,
-      finalPlan: finalState.finalPlan,
-      errors: finalState.errors ?? [],
-    });
-    res.end();
   } catch (err) {
-    logger.error(err.message);
-    try {
-      sseWrite(res, "error", { message: err.message });
-      res.end();
-    } catch (_) {
-      next(err);
-    }
+    failStream(res, err, next);
   }
 });
 
 /**
  * POST /api/travel/clarify/:sessionId
- * Human-in-the-loop: resume a paused graph after the user provides missing details.
- * Uses LangGraph's Command({ resume }) to continue from the exact interrupt() call
- * inside preferenceNodeWithHITL â€” no need to re-run from scratch.
+ * Resumes a run paused at interrupt() with the user's answer.
  * Body: { clarification: string }
  */
 router.post("/clarify/:sessionId", async (req, res, next) => {
@@ -158,9 +192,7 @@ router.post("/clarify/:sessionId", async (req, res, next) => {
     }
 
     const session = await Session.findById(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found" });
-    }
+    if (!session) return res.status(404).json({ error: "Session not found" });
     if (!session.awaitingClarification) {
       return res
         .status(400)
@@ -171,18 +203,10 @@ router.post("/clarify/:sessionId", async (req, res, next) => {
     session.awaitingClarification = false;
     await session.save();
 
-    logger.info(
-      `Clarification received for session ${sessionId}: "${clarification}"`,
-    );
+    const runId = randomUUID();
+    setupSSE(res);
+    sseWrite(res, "start", { message: "Got it — planning now...", runId });
 
-    setupSSE(req, res);
-    sseWrite(res, "start", {
-      message: "Got it! Planning your trip now...",
-      clarification,
-    });
-
-    // Resume the SAME graph thread â€” interrupt() returns `clarification` inside
-    // preferenceNodeWithHITL, then the remaining nodes run to completion.
     const result = await streamGraphWithSSE(
       res,
       new Command({ resume: clarification }),
@@ -190,47 +214,28 @@ router.post("/clarify/:sessionId", async (req, res, next) => {
     );
 
     if (result.interrupted) {
-      // Edge case: another interrupt after the first (should not happen normally)
       session.awaitingClarification = true;
       await session.save();
       sseWrite(res, "clarify", { sessionId, message: result.message });
-      res.end();
-      return;
+      return res.end();
     }
 
-    const { finalState } = result;
-    session.messages.push({ role: "assistant", content: finalState.finalPlan });
-    await session.save();
-
-    const plan = await Plan.create({
-      sessionId: session._id,
+    await finishRun({
+      res,
+      session,
+      runId,
       userRequest: clarification,
-      finalPlan: finalState.finalPlan,
-      fullState: finalState,
+      finalState: result.finalState,
     });
-
-    sseWrite(res, "done", {
-      sessionId: session._id,
-      planId: plan._id,
-      finalPlan: finalState.finalPlan,
-      errors: finalState.errors ?? [],
-    });
-    res.end();
   } catch (err) {
-    logger.error(err.message);
-    try {
-      sseWrite(res, "error", { message: err.message });
-      res.end();
-    } catch (_) {
-      next(err);
-    }
+    failStream(res, err, next);
   }
 });
+
 /**
  * POST /api/travel/followup/:sessionId
- * Follow-up message -- either a question/comment answered directly by LLM,
- * or a plan modification request that re-runs the full agent graph.
- * Body: { userRequest: string }
+ * Either answers a question about the existing plan directly, or re-runs the
+ * graph to modify it. Body: { userRequest: string }
  */
 router.post("/followup/:sessionId", async (req, res, next) => {
   try {
@@ -242,151 +247,128 @@ router.post("/followup/:sessionId", async (req, res, next) => {
     }
 
     const session = await Session.findById(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found" });
-    }
+    if (!session) return res.status(404).json({ error: "Session not found" });
 
     const lastPlan = await Plan.findOne({ sessionId }).sort({ createdAt: -1 });
 
     session.messages.push({ role: "user", content: userRequest });
     await session.save();
-    logger.info(`Follow-up for session ${sessionId}: "${userRequest}"`);
 
-    // Quickly decide: is the user asking to MODIFY the plan, or just asking a question/comment?
-    const isModification = await classifyFollowUpIntent(
-      userRequest,
-      lastPlan?.fullState,
-    );
+    const isModification = await classifyFollowUpIntent(userRequest, lastPlan);
 
-    setupSSE(req, res);
+    setupSSE(res);
 
+    // A question about the plan does not need the agents re-run.
     if (!isModification) {
-      // Direct conversational answer -- no need to re-run agents
       sseWrite(res, "start", { message: "Thinking...", userRequest });
-      const answer = await answerFollowUpDirectly(
-        userRequest,
-        lastPlan?.fullState,
-        lastPlan?.finalPlan,
-      );
+      const answer = await answerFollowUpDirectly(userRequest, lastPlan);
       session.messages.push({ role: "assistant", content: answer });
       await session.save();
       sseWrite(res, "done", {
         sessionId: session._id,
         finalPlan: answer,
+        contributors: [],
         errors: [],
       });
-      res.end();
-      return;
+      return res.end();
     }
 
-    // Full graph re-run for plan modifications
-    const contextRequest = buildFollowUpRequest(
-      userRequest,
-      lastPlan?.fullState,
-    );
-    sseWrite(res, "start", {
-      message: "Updating your travel plan...",
-      userRequest,
-    });
+    const runId = randomUUID();
+    sseWrite(res, "start", { message: "Updating your plan...", userRequest, runId });
 
-    const followUpThreadId = `${sessionId}-followup-${Date.now()}`;
-    // Pass existing plan state so the supervisor can decide which agents to skip
-    const existingState = lastPlan?.fullState ?? {};
+    // A fresh thread, seeded with prior output so the router can skip agents
+    // whose work still stands.
     const result = await streamGraphWithSSE(
       res,
       {
-        userRequest: contextRequest,
+        userRequest: buildFollowUpRequest(userRequest, lastPlan),
+        runId,
+        sessionId,
         errors: [],
-        // Carry forward computed state so supervisor can route intelligently
-        preferences: existingState.preferences ?? null,
-        destinationResearch: existingState.destinationResearch ?? null,
-        budgetPlan: existingState.budgetPlan ?? null,
-        itinerary: existingState.itinerary ?? null,
-        logistics: existingState.logistics ?? null,
+        preferences: lastPlan?.preferences ?? null,
+        destination: lastPlan?.destination ?? null,
+        itinerary: lastPlan?.itinerary ?? null,
+        budget: lastPlan?.budget ?? null,
       },
-      followUpThreadId,
+      `${sessionId}-followup-${runId}`,
     );
 
-    const { finalState } = result;
-    session.messages.push({ role: "assistant", content: finalState.finalPlan });
-    await session.save();
-
-    const plan = await Plan.create({
-      sessionId: session._id,
-      userRequest,
-      finalPlan: finalState.finalPlan,
-      fullState: finalState,
-    });
-
-    sseWrite(res, "done", {
-      sessionId: session._id,
-      planId: plan._id,
-      finalPlan: finalState.finalPlan,
-      errors: finalState.errors ?? [],
-    });
-    res.end();
-  } catch (err) {
-    logger.error(err.message);
-    try {
-      sseWrite(res, "error", { message: err.message });
-      res.end();
-    } catch (_) {
-      next(err);
+    // Follow-ups can interrupt too. The previous version destructured
+    // finalState unconditionally here and threw on that path.
+    if (result.interrupted) {
+      session.awaitingClarification = true;
+      await session.save();
+      sseWrite(res, "clarify", { sessionId, message: result.message });
+      return res.end();
     }
+
+    await finishRun({
+      res,
+      session,
+      runId,
+      userRequest,
+      finalState: result.finalState,
+    });
+  } catch (err) {
+    failStream(res, err, next);
   }
 });
 
-/**
- * GET /api/travel/sessions
- * Returns a list of all sessions with their first user message as a title.
- */
+// ── Read endpoints ───────────────────────────────────────────────────────────
+
+/** GET /api/travel/sessions */
 router.get("/sessions", async (req, res, next) => {
   try {
-    const sessions = await Session.find({}, "messages createdAt updatedAt");
+    const sessions = await Session.find({}, "messages createdAt updatedAt").sort(
+      { updatedAt: -1 },
+    );
 
-    const list = sessions
-      .map((s) => {
+    res.json({
+      sessions: sessions.map((s) => {
         const firstUserMsg = s.messages?.find((m) => m.role === "user");
-        // ObjectId always has a reliable embedded creation timestamp
-        const fallbackDate = s._id.getTimestamp();
-        const effectiveDate = s.updatedAt ?? s.createdAt ?? fallbackDate;
+        // ObjectIds carry a creation timestamp, so there is always a fallback
+        // for documents written before timestamps were enabled.
+        const fallback = s._id.getTimestamp();
         return {
           _id: s._id,
           title: firstUserMsg
             ? firstUserMsg.content.slice(0, 80)
             : "New conversation",
-          createdAt: s.createdAt ?? fallbackDate,
-          updatedAt: effectiveDate,
-          _sortMs: new Date(effectiveDate).getTime() || fallbackDate.getTime(),
+          createdAt: s.createdAt ?? fallback,
+          updatedAt: s.updatedAt ?? s.createdAt ?? fallback,
         };
-      })
-      // Sort newest first in JS — avoids null-ordering ambiguity in MongoDB
-      .sort((a, b) => b._sortMs - a._sortMs)
-      .map(({ _sortMs, ...rest }) => rest); // strip internal sort key
-
-    res.json({ sessions: list });
+      }),
+    });
   } catch (err) {
     next(err);
   }
 });
 
-/**
- * GET /api/travel/plans
- */
+/** GET /api/travel/session/:sessionId/messages */
+router.get("/session/:sessionId/messages", async (req, res, next) => {
+  try {
+    const session = await Session.findById(req.params.sessionId, "messages");
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    res.json({ messages: session.messages });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** GET /api/travel/plans */
 router.get("/plans", async (req, res, next) => {
   try {
-    const plans = await Plan.find({}, "sessionId userRequest createdAt").sort({
-      createdAt: -1,
-    });
+    const plans = await Plan.find(
+      {},
+      "runId sessionId userRequest route contributors budgetFlagged createdAt",
+    ).sort({ createdAt: -1 });
     res.json({ plans });
   } catch (err) {
     next(err);
   }
 });
 
-/**
- * GET /api/travel/plans/:id
- */
+/** GET /api/travel/plans/:id */
 router.get("/plans/:id", async (req, res, next) => {
   try {
     const plan = await Plan.findById(req.params.id);
@@ -398,72 +380,95 @@ router.get("/plans/:id", async (req, res, next) => {
 });
 
 /**
- * GET /api/travel/session/:sessionId/messages
+ * GET /api/travel/runs/:runId
+ * The audit trail for one request: which agents ran, on which model, how long,
+ * and whether they succeeded.
  */
-router.get("/session/:sessionId/messages", async (req, res, next) => {
+router.get("/runs/:runId", async (req, res, next) => {
   try {
-    const session = await Session.findById(req.params.sessionId, "messages");
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    res.json({ messages: session.messages });
+    const runs = await AgentRun.find({ runId: req.params.runId }).sort({
+      createdAt: 1,
+    });
+    res.json({ runId: req.params.runId, agents: runs });
   } catch (err) {
     next(err);
   }
 });
 
-function buildFollowUpRequest(followUp, lastState) {
-  const previousPrefs = lastState?.preferences
-    ? JSON.stringify(lastState.preferences, null, 2)
+// ── Follow-up helpers ────────────────────────────────────────────────────────
+
+function buildFollowUpRequest(followUp, lastPlan) {
+  const previousPrefs = lastPlan?.preferences
+    ? JSON.stringify(lastPlan.preferences, null, 2)
     : "None available";
 
-  return `This is a follow-up to a previous travel plan.
+  return `This is a follow-up to an existing travel plan.
 
-Previous extracted preferences:
+Previously extracted preferences:
 ${previousPrefs}
 
-User follow-up request: "${followUp}"
+The traveller now says: "${followUp}"
 
-Update the travel plan based on this follow-up. Keep all previous details that the user did not mention changing.`;
+Update the plan accordingly. Keep everything they did not ask to change.`;
 }
 
-async function classifyFollowUpIntent(userRequest, lastState) {
+async function classifyFollowUpIntent(userRequest, lastPlan) {
   try {
     const llm = getLLM({ level: "fast", temperature: 0 });
-    const destination =
-      lastState?.preferences?.destination ?? "the destination";
-    const response = await llm.invoke([
-      new SystemMessage(
-        `You are a classifier. The user has an existing travel plan for ${destination}.
-Decide if their message is a MODIFICATION request (they want to change, update, add, or remove something from the plan)
-or a QUESTION/COMMENT (they are asking about, commenting on, or discussing the existing plan without changing it).
+    const destination = lastPlan?.preferences?.destination ?? "their destination";
+
+    const response = await callLLM(
+      llm,
+      [
+        new SystemMessage(
+          `The user has an existing travel plan for ${destination}.
+Decide whether their message is a MODIFICATION request (change, update, add, or remove
+something in the plan) or a QUESTION/COMMENT about the existing plan.
 Reply with exactly one word: MODIFY or QUESTION.`,
-      ),
-      new HumanMessage(userRequest),
-    ]);
-    const verdict = (response.content ?? "").trim().toUpperCase();
-    return verdict === "MODIFY";
+        ),
+        new HumanMessage(userRequest),
+      ],
+      { label: "followup-intent" },
+    );
+
+    return normaliseContent(response.content).trim().toUpperCase() === "MODIFY";
   } catch {
+    // Re-running the agents is the safer default: it may be slower, but it
+    // cannot answer a modification request with stale content.
     return true;
   }
 }
 
-async function answerFollowUpDirectly(userRequest, lastState, finalPlan) {
+async function answerFollowUpDirectly(userRequest, lastPlan) {
   const llm = getLLM({ level: "fast", temperature: 0.5 });
-  const context = finalPlan
-    ? `Here is the current travel plan:\n\n${finalPlan}`
-    : lastState?.preferences
-      ? `Preferences: ${JSON.stringify(lastState.preferences)}`
+
+  const context = lastPlan?.finalPlan
+    ? `The current travel plan:\n\n${lastPlan.finalPlan}`
+    : lastPlan?.preferences
+      ? `Known preferences: ${JSON.stringify(lastPlan.preferences)}`
       : "No existing plan context available.";
-  const response = await llm.invoke([
-    new SystemMessage(
-      `You are a helpful travel agent assistant. Answer the user's question or comment about their travel plan.
-Be concise and helpful. If they point out an error or issue with the plan, acknowledge it and suggest a correction.
-Use markdown formatting where appropriate.`,
-    ),
-    new HumanMessage(context + "\n\nUser message: " + userRequest),
-  ]);
-  return typeof response.content === "string"
-    ? response.content
-    : JSON.stringify(response.content);
+
+  // Budget state is repeated explicitly so a chat reply cannot contradict the
+  // Budget Agent's verdict and quietly imply an over-budget trip is affordable.
+  const budgetNote =
+    lastPlan?.budget?.withinBudget === false
+      ? `\n\nNote: this trip is ${lastPlan.budget.overageAmount} ${lastPlan.budget.currency} OVER the stated budget. Do not imply it fits.`
+      : "";
+
+  const response = await callLLM(
+    llm,
+    [
+      new SystemMessage(
+        `You are a helpful travel assistant. Answer the user's question about their travel
+plan concisely, using markdown where it helps. If they point out a problem, acknowledge it
+and suggest a correction. Do not invent prices or venues that are not in the plan.`,
+      ),
+      new HumanMessage(`${context}${budgetNote}\n\nUser message: ${userRequest}`),
+    ],
+    { label: "followup-answer" },
+  );
+
+  return normaliseContent(response.content);
 }
 
 export default router;

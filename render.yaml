@@ -1,0 +1,23 @@
+# Render blueprint for the API.
+#
+# A long-running service, not a serverless function: a full run holds an SSE
+# connection open for 30-90s, well past the execution ceiling on free serverless
+# tiers. The static frontend is deployed separately — see README.
+services:
+  - type: web
+    name: trip-planner-api
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Set in the Render dashboard, never committed.
+      - key: GOOGLE_API_KEY
+        sync: false
+      # The deployed frontend origin, e.g. https://trip-planner.vercel.app
+      - key: ALLOWED_ORIGINS
+        sync: false

@@ -1,40 +1,41 @@
 import { getLLM } from "../utils/llm.js";
 import { buildItineraryPrompt } from "../prompts/itineraryPrompt.js";
-import { safeParseJSON } from "../utils/validateJson.js";
-import { runWithTools } from "../utils/toolRunner.js";
+import { runStructuredAgent } from "../utils/runStructuredAgent.js";
+import { ItineraryOutputSchema } from "../schemas/agents.js";
 import { getCurrentDateTool, getTripDatesTool } from "../tools/dateTool.js";
 import { logger } from "../utils/logger.js";
-import { emit } from "../utils/emitter.js";
+
+export const NAME = "Itinerary Agent";
 
 const llm = getLLM({ level: "smart", temperature: 0.5 });
-const { model, provider, temperature } = llm._meta;
 const TOOLS = [getCurrentDateTool, getTripDatesTool];
 
 export async function itineraryAgent(state) {
-  const t0 = Date.now();
-  const NAME = "Itinerary Agent";
+  const preferences = state.preferences ?? {};
 
-  logger.agentStart(NAME, model, provider, temperature);
-  emit("agent_start", { agent: NAME, step: 4, total: 6, model, provider });
+  const itinerary = await runStructuredAgent({
+    llm,
+    tools: TOOLS,
+    prompt: buildItineraryPrompt(preferences, state.destination),
+    schema: ItineraryOutputSchema,
+    name: NAME,
+  });
 
-  const prompt = buildItineraryPrompt(
-    state.preferences,
-    state.destinationResearch,
-    state.budgetPlan,
-  );
+  logger.stateUpdate("itinerary", {
+    destination: itinerary.destination,
+    totalDays: itinerary.totalDays,
+    confidence: itinerary.confidence,
+    uncertainties: itinerary.uncertainties.length,
+  });
 
-  // ── LLM + tool-calling loop ────────────────────────────────────────
-  const responseText = await runWithTools(llm, TOOLS, prompt, NAME);
-
-  // ── Parse ──────────────────────────────────────────────────────────
-  const result = safeParseJSON(responseText);
-  if (!result.ok) {
-    logger.error(`${NAME}: JSON parse failed — ${result.error}`);
-    return { errors: [`Itinerary Agent parse error: ${result.error}`] };
-  }
-
-  logger.stateUpdate("itinerary", result.data);
-  logger.agentEnd(NAME, Date.now() - t0);
-  emit("agent_done", { agent: NAME, step: 4, total: 6 });
-  return { itinerary: result.data };
+  return { itinerary };
 }
+
+export const itinerarySpec = {
+  key: "itinerary",
+  label: NAME,
+  meta: llm._meta,
+  run: itineraryAgent,
+  // A failed itinerary still leaves a usable destination and budget answer.
+  critical: false,
+};

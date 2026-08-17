@@ -1,4 +1,5 @@
 import { HumanMessage, ToolMessage } from "@langchain/core/messages";
+import { callLLM, normaliseContent } from "./llm.js";
 import { logger } from "./logger.js";
 import { emit } from "./emitter.js";
 
@@ -28,14 +29,12 @@ export async function runWithTools(
   const messages = [new HumanMessage(promptText)];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const response = await llmWithTools.invoke(messages);
+    const response = await callLLM(llmWithTools, messages, { label: agentName });
     messages.push(response);
 
     // No tool calls → final text answer
     if (!response.tool_calls || response.tool_calls.length === 0) {
-      return typeof response.content === "string"
-        ? response.content
-        : JSON.stringify(response.content);
+      return normaliseContent(response.content);
     }
 
     // Execute all tool calls in parallel
@@ -88,7 +87,5 @@ export async function runWithTools(
 
   // Exceeded iteration limit — return whatever the last AI message had
   const last = messages.findLast((m) => m._getType?.() === "ai");
-  return typeof last?.content === "string"
-    ? last.content
-    : JSON.stringify(last?.content ?? "");
+  return normaliseContent(last?.content);
 }
