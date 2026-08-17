@@ -102,6 +102,15 @@ export const BudgetResultSchema = z.object({
 
 export const PlanRequestSchema = z.object({
   request: z.string().trim().min(3).max(2000),
+  /** Earlier turns in the chat, oldest first, so a follow-up keeps its context. */
+  history: z.array(z.string().trim().max(2000)).max(20).optional(),
+  /**
+   * Which chat this turn belongs to. Every turn is its own run — that is what
+   * makes each one separately auditable — but without this they could not be
+   * grouped back into the conversation they came from. The server mints one when
+   * absent and returns it, so the client only has to echo it back.
+   */
+  conversationId: z.string().uuid().optional(),
 });
 
 export type HardConstraint = z.infer<typeof HardConstraintSchema>;

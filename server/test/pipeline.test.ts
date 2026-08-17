@@ -104,6 +104,45 @@ test("a where-only question routes to Destination alone", () => {
   assert.deepEqual(route(text, parseRequest(text)), ["destination"]);
 });
 
+test("a request with nothing to plan from asks instead of guessing", async () => {
+  let calls = 0;
+  setGenerate((async () => {
+    calls++;
+    throw new Error("the model must not be called for an unanswerable request");
+  }) as Generate);
+
+  const out = await buildPipeline().invoke({ request: "plan me a holiday" });
+
+  assert.equal(calls, 0, "asking is free — no model call may happen");
+  assert.deepEqual(out.route, [], "no agent may run");
+  assert.deepEqual(out.completed, []);
+  assert.ok(out.needs.length > 0);
+  assert.match(out.answer, /need a little more/i);
+});
+
+test("one usable signal is enough to proceed rather than interrogate", async () => {
+  setGenerate(stubModel());
+
+  // "somewhere warm" gives no destination and no length, but a climate constraint
+  // is something the Destination Agent can genuinely work from.
+  const out = await buildPipeline().invoke({ request: "somewhere warm" });
+
+  assert.deepEqual(out.needs, []);
+  assert.ok(out.route.includes("destination"));
+});
+
+test("an inferred trip length is disclosed, not silently invented", async () => {
+  setGenerate(stubModel());
+
+  const out = await buildPipeline().invoke({ request: "plan a trip to Lisbon" });
+
+  const itinerary = out.trace.find((t) => t.agent === "itinerary");
+  assert.ok(
+    itinerary?.guards.some((g) => /assumed a \d+-day trip/.test(g)),
+    "a length the user never gave must be surfaced as an assumption",
+  );
+});
+
 test("the brief's own example routes to all three", () => {
   // Deliberately the exact wording from the brief. It says "somewhere" but never
   // "plan" or "cost", so phrasing alone would route it to Destination only — the

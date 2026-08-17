@@ -90,7 +90,10 @@ web/src/
 4. **`synthesize`** — writes the answer from agent output only, and is told explicitly to lead
    with an overage or carry uncertainties through.
 
-Each node emits an SSE event, so the frontend shows routing and agent activity live.
+Each node emits an SSE event, so the chat shows routing and agent activity live: `plan` (the
+routing decision), one `agent` per agent that finishes, `token` for each piece of the answer as
+synthesis writes it, then `done` with the stored run. A follow-up posts the earlier turns as
+`history`, which is what makes "make it cheaper" resolve to the trip above it.
 
 ## Free-tier notes
 

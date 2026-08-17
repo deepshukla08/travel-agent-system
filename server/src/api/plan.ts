@@ -1,8 +1,9 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import { PlanRequestSchema } from "../schemas/index.js";
 import { pipeline } from "../graph/pipeline.js";
 import type { TripStateType } from "../graph/state.js";
-import { saveRun, getRun } from "../storage/runs.js";
+import { saveRun, getRun, getConversation } from "../storage/runs.js";
 import { validate, notFound, wrap } from "./deps.js";
 
 export const planRouter = Router();
@@ -10,17 +11,32 @@ export const planRouter = Router();
 /**
  * POST /api/plan — runs the graph, streaming one SSE event per node.
  *
- * Streamed in two modes at once: "updates" carries each node's patch, which is
- * what the activity feed renders live, and "values" carries the accumulated
- * state, whose last emission is the final result. One pass, no re-running the
- * graph to find out what it produced.
+ * Streamed in three modes at once: "updates" carries each node's patch, which is
+ * what the activity feed renders live, "custom" carries the answer's tokens as
+ * synthesis writes them, and "values" carries the accumulated state, whose last
+ * emission is the final result. One pass, no re-running the graph to find out
+ * what it produced.
  *
  * Persistence happens here, not in the agents — that is what keeps them pure.
  */
 planRouter.post(
   "/",
   wrap(async (req, res) => {
-    const { request } = validate(PlanRequestSchema, req.body);
+    const { request, history, conversationId } = validate(
+      PlanRequestSchema,
+      req.body,
+    );
+
+    // Minted here on the first turn so the client never has to invent one; it
+    // just echoes back whatever `done` gave it.
+    const chatId = conversationId ?? randomUUID();
+
+    // A follow-up ("make it cheaper") means nothing on its own, so the parser and
+    // the agents are given the earlier turns too.
+    //
+    // ponytail: concatenation, not a summariser — a stale number in turn one can
+    // still be picked up. Thread a real conversation state if that starts to bite.
+    const conversation = [...(history ?? []), request].join("\n");
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -37,8 +53,8 @@ planRouter.post(
 
     try {
       const stream = await pipeline.stream(
-        { request },
-        { streamMode: ["updates", "values"] },
+        { request: conversation },
+        { streamMode: ["updates", "values", "custom"] },
       );
 
       for await (const [mode, data] of stream as AsyncIterable<
@@ -46,6 +62,12 @@ planRouter.post(
       >) {
         if (mode === "values") {
           latest = data as TripStateType;
+          continue;
+        }
+
+        // One SSE frame per piece of prose the synthesiser writes.
+        if (mode === "custom") {
+          send("token", { text: String(data) });
           continue;
         }
 
@@ -81,6 +103,7 @@ planRouter.post(
 
     const runId = saveRun({
       request,
+      conversationId: chatId,
       constraints: latest.constraints,
       route: latest.route,
       answer: latest.answer,
@@ -95,6 +118,8 @@ planRouter.post(
 
     send("done", {
       runId,
+      // The client echoes this back on the next turn, so a chat's runs stay joined.
+      conversationId: chatId,
       answer: latest.answer,
       route: latest.route,
       trace: latest.trace,
@@ -103,6 +128,20 @@ planRouter.post(
       destination: latest.destination,
     });
     res.end();
+  }),
+);
+
+/**
+ * GET /api/plan/conversation/:id — every turn of one chat, oldest first.
+ *
+ * Declared before /:id so "conversation" is not swallowed as a run id.
+ */
+planRouter.get(
+  "/conversation/:id",
+  wrap(async (req, res) => {
+    const chat = getConversation(String(req.params.id));
+    if (!chat) return notFound(res, "conversation");
+    res.json(chat);
   }),
 );
 

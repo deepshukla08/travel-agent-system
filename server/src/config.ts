@@ -46,5 +46,5 @@ export const config = {
     "gemini-3.6-flash,gemini-3.5-flash,gemini-flash-latest,gemini-flash-lite-latest",
   ),
 
-  modelTimeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 45_000),
+  modelTimeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 90_000),
 } as const;

@@ -1,7 +1,17 @@
-import { StateGraph, START, END } from "@langchain/langgraph";
+import {
+  StateGraph,
+  START,
+  END,
+  type LangGraphRunnableConfig,
+} from "@langchain/langgraph";
 import { TripState, type TripStateType } from "./state.js";
 import { parseRequest } from "../tools/parseRequest.js";
-import { AGENTS, route, type AgentName } from "../tools/route.js";
+import {
+  AGENTS,
+  missingEssentials,
+  route,
+  type AgentName,
+} from "../tools/route.js";
 import { destinationAgent } from "../agents/destination.js";
 import { itineraryAgent } from "../agents/itinerary.js";
 import { budgetAgent } from "../agents/budget.js";
@@ -33,6 +43,12 @@ const NODE_FOR: Record<AgentName, NodeName> = {
 /** Deterministic: parse the request and decide the route. No model call. */
 function parseNode(state: TripStateType) {
   const constraints = parseRequest(state.request);
+
+  // Nothing to plan from — ask instead of spending four model calls on a guess.
+  // An empty route sends the graph straight to synthesis, which short-circuits.
+  const needs = missingEssentials(constraints);
+  if (needs.length > 0) return { constraints, needs, route: [] };
+
   return { constraints, route: route(state.request, constraints) };
 }
 
@@ -87,8 +103,25 @@ function guarded(
 
 const AnswerSchema = z.object({ markdown: z.string() });
 
-/** Merges the agents' output into one answer. Adds nothing of its own. */
-async function synthesizeNode(state: TripStateType) {
+/**
+ * Merges the agents' output into one answer. Adds nothing of its own.
+ *
+ * Written straight into the run's custom stream as the model produces it, so the
+ * chat renders the answer while it is being written rather than after.
+ */
+async function synthesizeNode(
+  state: TripStateType,
+  config: LangGraphRunnableConfig,
+) {
+  // The request could not be planned. Ask, without calling a model — the
+  // questions came from the deterministic parser, so there is nothing to generate.
+  if (state.needs.length > 0) {
+    const questions = state.needs.map((n) => `- ${n}`).join("\n");
+    return {
+      answer: `I need a little more to go on before I can put the agents to work:\n\n${questions}\n\nAnswer whichever you know and I will take it from there.`,
+    };
+  }
+
   const contributors = state.trace.filter((t) => t.ok).map((t) => t.agent);
 
   if (contributors.length === 0) {
@@ -172,6 +205,7 @@ Say plainly which part is missing. Do not invent the missing content.`,
       sections: sections.join("\n\n"),
       directives: directives.join("\n\n"),
     }),
+    (delta) => config.writer?.(delta),
   );
 
   return { answer: data.markdown };

@@ -14,7 +14,13 @@ import {
  * storage with its per-agent audit rows. Model stubbed, so it costs nothing.
  */
 
-const stub: Generate = (async (schema) => {
+const ANSWER = "# Lisbon\n\nFive days.";
+
+const stub: Generate = (async (
+  schema: unknown,
+  _prompt: string,
+  onToken?: (delta: string) => void,
+) => {
   const call = (data: unknown) => ({ data, model: "stub", ms: 1 });
 
   if (schema === DestinationResultSchema) {
@@ -55,7 +61,10 @@ const stub: Generate = (async (schema) => {
       assumptions: [],
     });
   }
-  return call({ markdown: "# Lisbon\n\nFive days." });
+  // Synthesis is the streamed call: hand the answer over in pieces the way the
+  // real model does, so the SSE token frames are exercised.
+  for (const piece of ANSWER.match(/\S+\s*/g) ?? []) onToken?.(piece);
+  return call({ markdown: ANSWER });
 }) as Generate;
 
 /** Boot on an ephemeral port so the checks never collide with a dev server. */
@@ -119,6 +128,105 @@ test("POST /api/plan streams plan, agent and done events in order", async () => 
     const done = events.at(-1)!.data as { runId: string; answer: string };
     assert.ok(done.runId);
     assert.match(done.answer, /Lisbon/);
+  });
+});
+
+test("the answer arrives as token events before done, and matches it", async () => {
+  await withServer(async (base) => {
+    const response = await fetch(`${base}/api/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "roughly what does a week in Rome cost?" }),
+    });
+
+    const events = await readSSE(response);
+    const names = events.map((e) => e.name);
+    const tokens = events.filter((e) => e.name === "token");
+
+    assert.ok(tokens.length > 1, "the answer must arrive in pieces, not one lump");
+    assert.ok(
+      names.indexOf("token") < names.indexOf("done"),
+      "prose must reach the client before the run finishes",
+    );
+
+    // What was streamed has to be the answer itself — a stream that drifts from
+    // the stored answer would show the reader something that was never saved.
+    const streamed = tokens.map((e) => String(e.data.text)).join("");
+    const { answer } = events.at(-1)!.data as { answer: string };
+    assert.equal(streamed, answer);
+  });
+});
+
+test("a follow-up carries the earlier turns into the routing decision", async () => {
+  await withServer(async (base) => {
+    const response = await fetch(`${base}/api/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: "make it cheaper",
+        history: ["plan 5 days in Lisbon for 2 people"],
+      }),
+    });
+
+    const events = await readSSE(response);
+    const plan = events[0]!.data as {
+      route: string[];
+      constraints: { days: number; destination: string; travellers: number };
+    };
+
+    // "make it cheaper" on its own parses to nothing and would route to all three.
+    // With the thread it is a cost question about a trip whose shape is known.
+    assert.ok(plan.route.includes("budget"));
+    assert.ok(!plan.route.includes("destination"), "the destination is settled");
+    assert.equal(plan.constraints.destination, "Lisbon");
+    assert.equal(plan.constraints.days, 5);
+    assert.equal(plan.constraints.travellers, 2);
+  });
+});
+
+test("every turn of a chat is stored against one conversation", async () => {
+  await withServer(async (base) => {
+    const ask = (body: Record<string, unknown>) =>
+      fetch(`${base}/api/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    const first = await readSSE(await ask({ request: "plan 4 days in Lisbon" }));
+    const one = first.at(-1)!.data as { runId: string; conversationId: string };
+    assert.ok(one.conversationId, "the server mints an id on the first turn");
+
+    const second = await readSSE(
+      await ask({
+        request: "make it cheaper",
+        history: ["plan 4 days in Lisbon"],
+        conversationId: one.conversationId,
+      }),
+    );
+    const two = second.at(-1)!.data as { runId: string; conversationId: string };
+
+    // Separate runs — each is independently auditable — but one conversation.
+    assert.notEqual(two.runId, one.runId);
+    assert.equal(two.conversationId, one.conversationId);
+
+    const chat = (await (
+      await fetch(`${base}/api/plan/conversation/${one.conversationId}`)
+    ).json()) as { turns: { id: string; request: string }[] };
+
+    assert.equal(chat.turns.length, 2, "both turns belong to the chat");
+    // Oldest first, so the thread reads in the order it was run.
+    assert.equal(chat.turns[0]!.request, "plan 4 days in Lisbon");
+    assert.equal(chat.turns[1]!.request, "make it cheaper");
+  });
+});
+
+test("an unknown conversation is a 404", async () => {
+  await withServer(async (base) => {
+    const response = await fetch(
+      `${base}/api/plan/conversation/11111111-1111-1111-1111-111111111111`,
+    );
+    assert.equal(response.status, 404);
   });
 });
 

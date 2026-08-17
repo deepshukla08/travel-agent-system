@@ -45,6 +45,14 @@ export async function itineraryAgent(state: TripStateType) {
   // given so a request with no stated length is not judged against null.
   const { value, fired } = guardItinerary(data, { ...constraints, days });
 
+  // An inferred trip length is an assumption, and an undisclosed assumption is
+  // the same failure the Budget guard exists to prevent — applied to days rather
+  // than money. Surfaced through the guard channel, which the UI already shows
+  // and the audit row already stores.
+  if (constraints.days === null) {
+    fired.unshift(`assumed a ${days}-day trip — no length was stated`);
+  }
+
   return {
     itinerary: value,
     trace: [{ agent: "itinerary" as const, model, ms, ok: true, guards: fired }],

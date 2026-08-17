@@ -73,6 +73,8 @@ export interface Budget {
 
 export interface PlanResult {
   runId: string;
+  /** Which chat this run belongs to. Echoed back on the next turn. */
+  conversationId: string;
   answer: string;
   route: AgentName[];
   trace: Trace[];
@@ -85,6 +87,8 @@ export interface PlanResult {
 export type PlanEvent =
   | { type: "plan"; constraints: Constraints; route: AgentName[] }
   | { type: "agent"; trace: Trace }
+  /** A piece of the answer, as the synthesiser writes it. */
+  | { type: "token"; text: string }
   | { type: "done"; result: PlanResult }
   | { type: "error"; message: string };
 

@@ -8,22 +8,32 @@ interface Props {
 }
 
 /**
- * Shows the routing decision and each agent as it completes.
+ * The thinking, live: what was read from the request, which agents the
+ * orchestrator picked, and each one's state as it works.
  *
- * This is the "which agents contributed" requirement and the agent-activity
- * state in one place. The route is rendered before any agent runs, so the
- * orchestration decision is visible rather than inferred from the output.
+ * A <details> that is open while the run is going and folds itself away when the
+ * answer lands — the reasoning is there to be checked, not to be scrolled past
+ * every time. Agents run in sequence, so the first one without a trace entry is
+ * the one currently working; no extra event is needed to know that.
  */
 export function AgentActivity({ constraints, route, trace, running }: Props) {
   if (!constraints && trace.length === 0) return null;
 
   const byAgent = new Map(trace.map((t) => [t.agent, t]));
+  const ms = trace.reduce((total, t) => total + t.ms, 0);
+  const contributed = trace.filter((t) => t.ok).length;
 
   return (
-    <section className="panel">
+    <details className="think" open={running}>
+      <summary>
+        {running
+          ? "Thinking"
+          : `Planned by ${contributed} of 3 agents · ${(ms / 1000).toFixed(1)}s`}
+      </summary>
+
       {constraints && (
         <>
-          <h2>What we read from your request</h2>
+          <h2>What I read from that</h2>
           <ul className="chips">
             {constraints.destination && <li>{constraints.destination}</li>}
             {constraints.days && <li>{constraints.days} days</li>}
@@ -48,7 +58,7 @@ export function AgentActivity({ constraints, route, trace, running }: Props) {
       )}
 
       <h2>
-        Agents for this request
+        Agents on it
         {route.length > 0 && <span className="muted"> — {route.length} of 3</span>}
       </h2>
 
@@ -85,6 +95,6 @@ export function AgentActivity({ constraints, route, trace, running }: Props) {
           );
         })}
       </ol>
-    </section>
+    </details>
   );
 }

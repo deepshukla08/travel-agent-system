@@ -4,6 +4,33 @@ export const AGENTS = ["destination", "itinerary", "budget"] as const;
 export type AgentName = (typeof AGENTS)[number];
 
 /**
+ * What the request is missing before any agent can do useful work.
+ *
+ * Deterministic, so this costs nothing and runs before a single model call.
+ * "Plan me a holiday" parses to nothing at all: the Destination Agent would have
+ * no preferences to justify a suggestion against, and the Itinerary Agent would
+ * invent a trip length. Asking is the honest answer, and asking for free is
+ * better than spending four model calls to guess.
+ *
+ * Deliberately narrow — this is not a required-fields form. One usable signal is
+ * enough to proceed, because a partial answer plus stated assumptions beats an
+ * interrogation.
+ */
+export function missingEssentials(constraints: Constraints): string[] {
+  // Somewhere to go, or something to choose one by. Either will do.
+  const hasSomewhere =
+    constraints.destination !== null || constraints.hard.length > 0;
+
+  if (hasSomewhere) return [];
+
+  return [
+    "**Where**, or what kind of place? A city, a region, or just “somewhere warm and walkable”.",
+    "**How long** is the trip?",
+    "**Roughly what budget**, in total? A number or a band is fine.",
+  ];
+}
+
+/**
  * Decides which agents a request needs.
  *
  * Deterministic, from the parsed constraints — so "roughly what does a week in

@@ -55,6 +55,12 @@ export const TripState = Annotation.Root({
   constraints: Annotation<Constraints | null>(replace<Constraints | null>(null)),
   route: Annotation<AgentName[]>(replace<AgentName[]>([])),
 
+  /**
+   * Questions to put back to the user when the request cannot be planned at all.
+   * Non-empty means no agent runs and no model is called.
+   */
+  needs: Annotation<string[]>(replace<string[]>([])),
+
   // One field per agent.
   destination: Annotation<DestinationResult | null>(
     replace<DestinationResult | null>(null),

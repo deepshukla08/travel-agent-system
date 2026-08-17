@@ -2,19 +2,29 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { PlanResult } from "../lib/types.js";
 
+interface Props {
+  /** Null until `done` arrives — while streaming there is prose but no result. */
+  result: PlanResult | null;
+  /** The tokens so far, or the finished answer once there is one. */
+  markdown: string;
+  streaming: boolean;
+}
+
 /**
- * The synthesised answer, with the two things that must not be buried in prose:
- * an over-budget verdict and any day the Itinerary Agent flagged uncertain.
+ * The answer, with the two things that must not be buried in prose: an
+ * over-budget verdict and any day the Itinerary Agent flagged uncertain.
  *
  * Both are rendered from structured fields rather than trusted to appear in the
  * markdown — that is what makes the behavioural constraints visible in the UI.
+ * They render once the run finishes; before then there is only the prose, which
+ * is why the banners sit above it and not inside it.
  */
-export function Answer({ result }: { result: PlanResult }) {
-  const flagged = result.itinerary?.days.filter((d) => d.uncertain) ?? [];
-  const budget = result.budget;
+export function Answer({ result, markdown, streaming }: Props) {
+  const flagged = result?.itinerary?.days.filter((d) => d.uncertain) ?? [];
+  const budget = result?.budget;
 
   return (
-    <section className="panel">
+    <div className="answer">
       {budget?.overBudget && (
         <div className="banner banner--over">
           <strong>
@@ -65,13 +75,18 @@ export function Answer({ result }: { result: PlanResult }) {
         </div>
       )}
 
-      <article className="markdown">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.answer}</ReactMarkdown>
+      {/* The caret is drawn on the last block by CSS, so it sits in the text
+          rather than on a line of its own. */}
+      <article className={streaming ? "markdown streaming" : "markdown"}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
       </article>
 
-      <footer className="muted small">
-        Run {result.runId} · agents: {result.trace.map((t) => t.agent).join(", ") || "none"}
-      </footer>
-    </section>
+      {result && (
+        <footer className="muted small">
+          Run {result.runId} · agents:{" "}
+          {result.trace.map((t) => t.agent).join(", ") || "none"}
+        </footer>
+      )}
+    </div>
   );
 }

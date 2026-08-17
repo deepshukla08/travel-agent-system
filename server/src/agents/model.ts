@@ -24,6 +24,8 @@ export interface ModelCall<T> {
 export type Generate = <T>(
   schema: z.ZodType<T>,
   prompt: string,
+  /** Given, the call is streamed and each new piece of prose is handed over. */
+  onToken?: (delta: string) => void,
 ) => Promise<ModelCall<T>>;
 
 /** Models whose daily quota is spent. Process-lifetime only, by design. */
@@ -60,7 +62,16 @@ function readable(err: unknown): string {
   if (/api key not valid|api_key_invalid/i.test(message)) {
     return "Invalid GOOGLE_API_KEY — check server/.env against a key from https://aistudio.google.com/apikey";
   }
+  // The SDK reports a blown httpOptions.timeout as "This operation was aborted",
+  // which tells the reader nothing about the cause.
+  if (isTimeout(message)) {
+    return `Model call exceeded the ${config.modelTimeoutMs}ms deadline (LLM_TIMEOUT_MS)`;
+  }
   return message;
+}
+
+function isTimeout(message: string): boolean {
+  return /operation was aborted|aborted|timed? ?out|deadline/i.test(message);
 }
 
 function statusOf(err: unknown): number | null {
@@ -88,9 +99,82 @@ function isUnavailableModel(err: unknown): boolean {
   );
 }
 
+/**
+ * The prose written so far, pulled out of a half-arrived JSON response.
+ *
+ * A streamed structured answer turns up as `{"markdown":"# Lis`, so the value is
+ * unescaped by hand. Whatever this gets slightly wrong is corrected the moment
+ * the finished response is parsed — the stream exists only to be looked at.
+ */
+export function streamedText(partial: string): string {
+  const colon = partial.indexOf(":");
+  const open = colon === -1 ? -1 : partial.indexOf('"', colon + 1);
+  if (open === -1) return "";
+
+  let out = "";
+  for (let i = open + 1; i < partial.length; i++) {
+    const ch = partial[i]!;
+    if (ch === '"') break;
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+
+    const esc = partial[++i];
+    if (esc === undefined) break; // escape split across chunks — it lands next read
+    // ponytail: \uXXXX is dropped mid-flight; the `done` payload carries the real text.
+    if (esc === "u") {
+      i += 4;
+      continue;
+    }
+    out += esc === "n" ? "\n" : esc === "t" ? "\t" : esc === "r" ? "\r" : esc;
+  }
+  return out;
+}
+
+/** One attempt against one model. Streamed only when someone is listening. */
+async function callModel<T>(
+  model: string,
+  schema: z.ZodType<T>,
+  prompt: string,
+  onToken?: (delta: string) => void,
+): Promise<string> {
+  const request = {
+    model,
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseJsonSchema: toGeminiSchema(schema),
+      httpOptions: { timeout: config.modelTimeoutMs },
+    },
+  };
+
+  if (!onToken) {
+    const response = await getClient().models.generateContent(request);
+    return response.text ?? "";
+  }
+
+  let raw = "";
+  let sent = 0;
+
+  for await (const chunk of await getClient().models.generateContentStream(
+    request,
+  )) {
+    raw += chunk.text ?? "";
+    const text = streamedText(raw);
+    if (text.length > sent) {
+      onToken(text.slice(sent));
+      sent = text.length;
+    }
+  }
+
+  return raw;
+}
+
 const realGenerate: Generate = async <T>(
   schema: z.ZodType<T>,
   prompt: string,
+  onToken?: (delta: string) => void,
 ): Promise<ModelCall<T>> => {
   const candidates = config.modelChain.filter((m) => !exhausted.has(m));
   if (candidates.length === 0) {
@@ -105,17 +189,7 @@ const realGenerate: Generate = async <T>(
     const started = Date.now();
 
     try {
-      const response = await getClient().models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseJsonSchema: toGeminiSchema(schema),
-          httpOptions: { timeout: config.modelTimeoutMs },
-        },
-      });
-
-      const text = response.text;
+      const text = await callModel(model, schema, prompt, onToken);
       if (!text) throw new Error(`${model} returned an empty response`);
 
       // Validate at the boundary: malformed output fails here, not three nodes
@@ -150,6 +224,13 @@ const realGenerate: Generate = async <T>(
         console.warn(`[model] ${model} is retired or inaccessible — struck off`);
         continue;
       }
+      if (isTimeout(String((err as Error)?.message ?? ""))) {
+        // Not struck off — the model is fine, this prompt was just slow on it.
+        // The next entry is a lighter model, which often lands inside the
+        // deadline where the heavier one did not.
+        console.warn(`[model] ${model} exceeded the deadline — next in chain`);
+        continue;
+      }
       // Not transient — no point trying the rest of the chain.
       throw new Error(readable(err));
     }
@@ -163,7 +244,8 @@ const realGenerate: Generate = async <T>(
 // without spending a single free-tier request.
 let active: Generate = realGenerate;
 
-export const generate: Generate = (schema, prompt) => active(schema, prompt);
+export const generate: Generate = (schema, prompt, onToken) =>
+  active(schema, prompt, onToken);
 
 export function setGenerate(fn: Generate): void {
   active = fn;
