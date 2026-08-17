@@ -154,7 +154,12 @@ test("the run and its agent rows are persisted and readable", async () => {
     const run = (await stored.json()) as {
       request: string;
       route: string;
-      agents: { agent: string; model: string; ok: number }[];
+      agents: {
+        agent: string;
+        model: string;
+        ok: number;
+        output: string | null;
+      }[];
     };
 
     assert.match(run.request, /somewhere warm/);
@@ -166,6 +171,17 @@ test("the run and its agent rows are persisted and readable", async () => {
     // One audit row per agent, recording which model served it.
     assert.equal(run.agents.length, 3);
     assert.ok(run.agents.every((a) => a.model === "stub" && a.ok === 1));
+
+    // Each agent's own output is stored, not just the final prose — otherwise a
+    // run cannot be inspected after the fact.
+    assert.ok(
+      run.agents.every((a) => a.output && a.output !== "null"),
+      "every agent row must carry its output",
+    );
+
+    const budgetRow = run.agents.find((a) => a.agent === "budget");
+    const budget = JSON.parse(budgetRow!.output!) as { total: number };
+    assert.equal(budget.total, 1200);
   });
 });
 

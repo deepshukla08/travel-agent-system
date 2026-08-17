@@ -86,6 +86,11 @@ planRouter.post(
       answer: latest.answer,
       totalMs: Date.now() - started,
       trace: latest.trace,
+      outputs: {
+        destination: latest.destination,
+        itinerary: latest.itinerary,
+        budget: latest.budget,
+      },
     });
 
     send("done", {

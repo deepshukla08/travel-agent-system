@@ -72,6 +72,22 @@ function statusOf(err: unknown): number | null {
   return match?.[1] ? Number(match[1]) : null;
 }
 
+/**
+ * A retired or inaccessible model. Comes back as a 400/404, not a 5xx, so
+ * without this check the chain would throw on its first entry instead of moving
+ * to the next — which is the whole reason the chain exists. Google retires Flash
+ * models on a few months' notice, and models.list() still returns some that a
+ * newer key cannot call.
+ */
+function isUnavailableModel(err: unknown): boolean {
+  const message = String((err as Error)?.message ?? "");
+  return (
+    /no longer available|is not found|not supported|does not exist|NOT_FOUND/i.test(
+      message,
+    ) && /model/i.test(message)
+  );
+}
+
 const realGenerate: Generate = async <T>(
   schema: z.ZodType<T>,
   prompt: string,
@@ -126,6 +142,12 @@ const realGenerate: Generate = async <T>(
       }
       if (status === 503 || status === 500 || status === 502 || status === 504) {
         console.warn(`[model] ${model} unavailable (${status}) — next in chain`);
+        continue;
+      }
+      if (isUnavailableModel(err)) {
+        // Retired for good, not just today — strike it off like an exhausted quota.
+        exhausted.add(model);
+        console.warn(`[model] ${model} is retired or inaccessible — struck off`);
         continue;
       }
       // Not transient — no point trying the rest of the chain.

@@ -30,12 +30,20 @@ export const config = {
    * runs dry mid-afternoon. The client walks this chain in order:
    *   429 → that model's daily quota is gone, move on and do not come back
    *   503 → that model is contended right now, move on
-   * Ordered cheapest-capable first; lite models are last because they hold the
-   * numeric reasoning worst.
+   * Ordered capable-first; lite models are last because they hold the numeric
+   * reasoning worst.
+   *
+   * These IDs were confirmed by actually calling them. Two traps found doing so:
+   * gemini-2.0-flash is retired outright, and gemini-2.5-flash still appears in
+   * models.list() but rejects new keys with "no longer available to new users".
+   * So the list endpoint is not proof a model is callable — only a call is.
+   *
+   * The `-latest` aliases sit last so the chain survives the next retirement
+   * without a code change.
    */
   modelChain: list(
     process.env.GEMINI_MODELS,
-    "gemini-2.0-flash,gemini-2.5-flash,gemini-2.0-flash-lite,gemini-2.5-flash-lite",
+    "gemini-3.6-flash,gemini-3.5-flash,gemini-flash-latest,gemini-flash-lite-latest",
   ),
 
   modelTimeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 45_000),

@@ -41,6 +41,7 @@ db.exec(`
     ms         INTEGER NOT NULL,
     ok         INTEGER NOT NULL,
     guards     TEXT NOT NULL,      -- JSON array of guard messages
+    output     TEXT,               -- this agent's own result, JSON
     error      TEXT,
     created_at TEXT NOT NULL
   );
@@ -49,14 +50,23 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC);
 `);
 
+// Forward migration for databases created before `output` existed. Cheaper than
+// a migration tool for one column, and CREATE TABLE IF NOT EXISTS won't add it.
+const columns = db.prepare(`PRAGMA table_info(agent_runs)`).all() as {
+  name: string;
+}[];
+if (!columns.some((c) => c.name === "output")) {
+  db.exec(`ALTER TABLE agent_runs ADD COLUMN output TEXT`);
+}
+
 const insertRun = db.prepare(`
   INSERT INTO runs (id, request, constraints, route, answer, total_ms, guards_fired, created_at)
   VALUES (@id, @request, @constraints, @route, @answer, @total_ms, @guards_fired, @created_at)
 `);
 
 const insertAgentRun = db.prepare(`
-  INSERT INTO agent_runs (run_id, agent, model, ms, ok, guards, error, created_at)
-  VALUES (@run_id, @agent, @model, @ms, @ok, @guards, @error, @created_at)
+  INSERT INTO agent_runs (run_id, agent, model, ms, ok, guards, output, error, created_at)
+  VALUES (@run_id, @agent, @model, @ms, @ok, @guards, @output, @error, @created_at)
 `);
 
 export interface SaveRun {
@@ -66,6 +76,11 @@ export interface SaveRun {
   answer: string;
   totalMs: number;
   trace: Trace[];
+  /**
+   * Each agent's own result, keyed by agent name. Stored per agent row rather
+   * than on the run, so a partial run keeps whatever did succeed.
+   */
+  outputs: Partial<Record<string, unknown>>;
 }
 
 /** Written in one transaction so a run and its agents can never disagree. */
@@ -85,6 +100,7 @@ export const saveRun = db.transaction((run: SaveRun): string => {
   });
 
   for (const t of run.trace) {
+    const output = run.outputs[t.agent];
     insertAgentRun.run({
       run_id: id,
       agent: t.agent,
@@ -92,6 +108,7 @@ export const saveRun = db.transaction((run: SaveRun): string => {
       ms: t.ms,
       ok: t.ok ? 1 : 0,
       guards: JSON.stringify(t.guards),
+      output: output === undefined ? null : JSON.stringify(output),
       error: t.error ?? null,
       created_at: createdAt,
     });
