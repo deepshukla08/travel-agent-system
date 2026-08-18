@@ -116,6 +116,16 @@ button.ghost:hover {
   color: var(--text);
 }
 
+/* The way out of a screen: never the loudest thing on it, always present. */
+button.backlink {
+  display: block;
+  margin: 1.5rem 0 0.75rem;
+}
+
+.landing > button.backlink {
+  margin: 0 0 1.25rem;
+}
+
 button.chip-btn {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -261,6 +271,18 @@ button.chip-btn:hover:not(:disabled) {
   color: var(--muted);
   font-family: var(--mono);
   font-size: 0.8rem;
+}
+
+/* The tail of the answer being written. Deliberately quiet: it is a sign of
+   life, not something to read — the finished trip is what gets read. */
+.working__prose {
+  margin: 0.9rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  max-height: 3rem;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 40%, transparent);
 }
 
 /* ── Chips ────────────────────────────────────────────────────────────────── */

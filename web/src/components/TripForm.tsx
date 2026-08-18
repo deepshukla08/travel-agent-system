@@ -37,13 +37,16 @@ export function TripForm({ needs, disabled, onSubmit }: Props) {
   const filled = needs.filter((n) => answers[n.id]?.trim());
 
   function submit() {
-    if (filled.length === 0) return;
-
-    // The sentence appears in the chat as the reader's own message, so each answer
+    // The sentence is shown back as the request that was planned, so each answer
     // is phrased for what it means. Joining the raw values read as
     // "Plan a trip — Chandigarh, 3, 5k", where the only place name was the origin
     // and got taken for the destination.
-    const sentence = `Plan a trip ${filled.map((n) => phrase(n.id, answers[n.id]!.trim())).join(", ")}`;
+    //
+    // Every box blank is allowed, because the page offers it: that plans a trip
+    // with nothing settled, which is the Destination Agent's whole job.
+    const sentence = filled.length
+      ? `Plan a trip ${filled.map((n) => phrase(n.id, answers[n.id]!.trim())).join(", ")}`
+      : "Plan a trip";
 
     // Every field that was asked, including the blanks. A blank is an answer —
     // "you choose" — and omitting it would look like the question was never put.
@@ -78,8 +81,8 @@ export function TripForm({ needs, disabled, onSubmit }: Props) {
         </label>
       ))}
 
-      <button type="submit" disabled={disabled || filled.length === 0}>
-        Plan my trip
+      <button type="submit" disabled={disabled}>
+        {filled.length === 0 ? "Choose for me" : "Plan my trip"}
       </button>
     </form>
   );

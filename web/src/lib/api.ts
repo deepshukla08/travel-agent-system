@@ -1,3 +1,4 @@
+import { debugEnabled } from "./debug.js";
 import type {
   AgentName,
   Constraints,
@@ -53,7 +54,9 @@ export async function* streamPlan(
   const response = await fetch(`${BASE}/api/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request, answers }),
+    // The state stream is asked for only when the console is listening — see
+    // debug.ts. Nobody else should be sent the whole graph state per node.
+    body: JSON.stringify({ request, answers, debug: debugEnabled }),
     signal,
   });
 
@@ -106,6 +109,8 @@ function parseFrame(frame: string): PlanEvent | null {
       return { type: "agent", trace: data as unknown as Trace };
     case "token":
       return { type: "token", text: String(data.text) };
+    case "state":
+      return { type: "state", state: data };
     case "done":
       return { type: "done", result: data as unknown as TripResult };
     case "error":

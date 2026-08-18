@@ -49,6 +49,8 @@ export default function App() {
   const [trace, setTrace] = useState<Trace[]>([]);
   const [result, setResult] = useState<TripResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The answer as it is written. Shown so the last step is visibly alive. */
+  const [writing, setWriting] = useState("");
 
   const abort = useRef<AbortController | null>(null);
 
@@ -85,9 +87,26 @@ export default function App() {
     goto(null);
   }
 
+  /**
+   * Out of the questions, back to the box — keeping what was asked, so it can be
+   * rephrased rather than retyped.
+   */
+  function back() {
+    abort.current?.abort();
+    setResult(null);
+    setError(null);
+    if (window.location.pathname === "/ask") window.history.back();
+  }
+
   async function plan(text: string, answers?: Record<string, string>) {
     const asked = text.trim();
     if (!asked || running) return;
+
+    // Consume the questions entry rather than stacking on it, so Back from the
+    // finished trip goes to the request box and not to answered questions.
+    if (window.location.pathname === "/ask") {
+      window.history.replaceState({}, "", "/");
+    }
 
     setRequest(asked);
     setRunning(true);
@@ -96,6 +115,7 @@ export default function App() {
     setConstraints(null);
     setRoute([]);
     setTrace([]);
+    setWriting("");
 
     const controller = new AbortController();
     abort.current = controller;
@@ -123,8 +143,10 @@ export default function App() {
             setError(event.message);
             break;
           case "token":
-            // Prose arrives for the debug console; the page renders from the
-            // finished result.
+            // The page renders from the finished result; this is only so the
+            // write-up step shows something happening instead of three finished
+            // agents and a still screen.
+            setWriting((prev) => prev + event.text);
             break;
         }
       }
@@ -142,6 +164,18 @@ export default function App() {
 
   const asking = result?.needs.length ? result.needs : null;
 
+  // The questions are a screen of their own, so the browser's Back button should
+  // leave them rather than the whole app. The entry is replaced once planning
+  // starts, so a finished trip's Back still lands on the request box.
+  useEffect(() => {
+    if (!asking) return;
+
+    window.history.pushState({}, "", "/ask");
+    const onPop = () => setResult(null);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [asking]);
+
   return (
     <div className="app">
       {running && (
@@ -150,6 +184,8 @@ export default function App() {
           constraints={constraints}
           route={route}
           trace={trace}
+          writing={writing}
+          onCancel={reset}
         />
       )}
 
@@ -166,6 +202,9 @@ export default function App() {
       {/* Too vague to plan: ask once, with a form, then generate. */}
       {!running && !error && asking && (
         <div className="landing">
+          <button type="button" className="ghost backlink" onClick={back}>
+            ← Back to your request
+          </button>
           <h1>Nearly there</h1>
           <p className="lede">{result?.answer}</p>
           <TripForm
@@ -182,6 +221,7 @@ export default function App() {
 
       {!running && !error && !asking && !result && (
         <PromptPage
+          initial={request}
           disabled={running}
           onSubmit={(text) => void plan(text)}
           onOpen={goto}

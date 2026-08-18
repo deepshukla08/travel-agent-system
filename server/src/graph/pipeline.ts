@@ -41,8 +41,8 @@ const NODE_FOR: Record<AgentName, NodeName> = {
 };
 
 /**
- * Deterministic: settle the constraints and turn intent into a route. No model
- * call — which is what keeps the routing decision unit-testable.
+ * Deterministic: settle the constraints and pick the agent set. No model call —
+ * which is what keeps the routing decision unit-testable.
  */
 function parseNode(state: TripStateType) {
   // Form answers are folded over the free-text parse: given field by field, they
@@ -51,7 +51,13 @@ function parseNode(state: TripStateType) {
 
   // Nothing to plan from — ask instead of spending model calls on a guess.
   // An empty route sends the graph straight to synthesis, which short-circuits.
-  const needs = missingEssentials(constraints);
+  //
+  // Asked once only. Coming back from the form with every box blank is itself an
+  // answer — "you choose" — and asking the same four questions again would be a
+  // loop with no way out. With nowhere settled the Destination Agent runs and
+  // suggests somewhere, which is what the form offered to do.
+  const answered = Object.keys(state.answers).length > 0;
+  const needs = answered ? [] : missingEssentials(constraints);
   if (needs.length > 0) return { constraints, needs, route: [] };
 
   return { constraints, route: route(state.request, constraints) };
@@ -165,7 +171,7 @@ const AnswerSchema = z.object({ markdown: z.string() });
  * Merges the agents' output into one answer. Adds nothing of its own.
  *
  * Written straight into the run's custom stream as the model produces it, so the
- * chat renders the answer while it is being written rather than after.
+ * page renders the answer while it is being written rather than after.
  */
 async function synthesizeNode(
   state: TripStateType,
@@ -181,11 +187,8 @@ async function synthesizeNode(
     };
   }
 
-  // Only the three specialists count as contributors. The intent step is in the
-  // trace because it is a model call worth auditing, but it produced no travel
-  // content, so crediting it would misstate who wrote the answer.
-  // Deduped: a replan puts Itinerary and Budget in the trace twice, and crediting
-  // an agent twice would read as five agents rather than three.
+  // Who to credit. Deduped because a replan puts Itinerary and Budget in the
+  // trace twice, and crediting an agent twice reads as five agents, not three.
   const contributors = [
     ...new Set(
       state.trace

@@ -3,6 +3,8 @@ import { fetchRecent, type RecentTrip } from "../lib/api.js";
 import type { Constraints } from "../lib/types.js";
 
 interface Props {
+  /** What was asked before, when coming back from the questions — not retyped. */
+  initial?: string;
   disabled: boolean;
   onSubmit: (request: string) => void;
   onOpen: (id: string) => void;
@@ -16,8 +18,8 @@ const EXAMPLES = [
 ];
 
 /** Where a trip starts: one box, one request. */
-export function PromptPage({ disabled, onSubmit, onOpen }: Props) {
-  const [draft, setDraft] = useState("");
+export function PromptPage({ initial, disabled, onSubmit, onOpen }: Props) {
+  const [draft, setDraft] = useState(initial ?? "");
   const [recent, setRecent] = useState<RecentTrip[]>([]);
 
   useEffect(() => {

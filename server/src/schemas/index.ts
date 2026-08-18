@@ -192,6 +192,12 @@ export const PlanRequestSchema = z.object({
   request: z.string().trim().min(1).max(2000),
   /** Field-by-field answers, when the request came back through the form. */
   answers: AnswersSchema.optional(),
+  /**
+   * Stream the accumulated graph state after every node, for the browser's debug
+   * console. Off by default: it is the whole state on every step, which no one
+   * using the app needs to be sent.
+   */
+  debug: z.boolean().optional(),
 });
 
 export type HardConstraint = z.infer<typeof HardConstraintSchema>;
@@ -202,7 +208,6 @@ export type DestinationResult = z.infer<typeof DestinationResultSchema>;
 export type Day = z.infer<typeof DaySchema>;
 export type ItineraryResult = z.infer<typeof ItineraryResultSchema>;
 export type BudgetResult = z.infer<typeof BudgetResultSchema>;
-export type Alternative = z.infer<typeof AlternativeSchema>;
 export type Need = z.infer<typeof NeedSchema>;
 export type Answers = z.infer<typeof AnswersSchema>;
 

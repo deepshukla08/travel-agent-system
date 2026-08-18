@@ -125,6 +125,12 @@ export type PlanEvent =
   | { type: "agent"; trace: Trace }
   /** A piece of the answer, as the synthesiser writes it. */
   | { type: "token"; text: string }
+  /**
+   * The whole graph state after a node ran, sent only when the debug console is
+   * on. Untyped on purpose: it is whatever TripState holds today, and pinning a
+   * mirror of it here would need editing every time a channel is added.
+   */
+  | { type: "state"; state: Record<string, unknown> }
   | { type: "done"; result: TripResult }
   | { type: "error"; message: string };
 

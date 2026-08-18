@@ -21,7 +21,7 @@ export const planRouter = Router();
 planRouter.post(
   "/",
   wrap(async (req, res) => {
-    const { request, answers } = validate(PlanRequestSchema, req.body);
+    const { request, answers, debug } = validate(PlanRequestSchema, req.body);
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -47,6 +47,9 @@ planRouter.post(
       >) {
         if (mode === "values") {
           latest = data as TripStateType;
+          // The whole state after every node, for the debug console: what each
+          // node actually wrote, rather than what the UI chose to render.
+          if (debug) send("state", data);
           continue;
         }
 

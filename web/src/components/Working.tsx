@@ -5,6 +5,9 @@ interface Props {
   constraints: Constraints | null;
   route: AgentName[];
   trace: Trace[];
+  /** The answer so far, streamed while the write-up step runs. */
+  writing: string;
+  onCancel: () => void;
 }
 
 /**
@@ -15,9 +18,23 @@ interface Props {
  * agents were chosen, and which are still going. Agents run in sequence, so the
  * first one without a trace entry is the one working — no extra event needed.
  */
-export function Working({ request, constraints, route, trace }: Props) {
+export function Working({
+  request,
+  constraints,
+  route,
+  trace,
+  writing,
+  onCancel,
+}: Props) {
   const done = new Map(trace.map((t) => [t.agent, t]));
   const finished = route.filter((a) => done.has(a)).length;
+
+  // Writing the answer is a step of its own and the slowest thing after the last
+  // agent. Left off the list, it showed three finished agents and a still page
+  // for half a minute, which reads as hung. It counts towards the bar too, so
+  // that never sits at 100% while there is work left.
+  const writingUp = route.length > 0 && finished === route.length;
+  const steps = route.length + 1;
 
   return (
     <div className="working">
@@ -29,7 +46,7 @@ export function Working({ request, constraints, route, trace }: Props) {
         <div
           className="working__bar-fill"
           style={{
-            width: `${route.length ? (finished / route.length) * 100 : 8}%`,
+            width: `${route.length ? (finished / steps) * 100 : 8}%`,
           }}
         />
       </div>
@@ -53,8 +70,28 @@ export function Working({ request, constraints, route, trace }: Props) {
               </li>
             );
           })}
+
+          {writingUp && (
+            <li className="step step--running">
+              <span className="step__name">Writing it up</span>
+              <span className="step__note">working…</span>
+            </li>
+          )}
         </ol>
       )}
+
+      {/* The prose itself, as it arrives — proof the run is alive, and the only
+          honest progress indicator for a step with no known length. */}
+      {writingUp && writing && (
+        <p className="working__prose" aria-live="polite">
+          …{writing.slice(-180).replace(/[#*`>|-]/g, " ")}
+        </p>
+      )}
+
+      {/* A run takes a minute or so. Waiting it out should be a choice. */}
+      <button type="button" className="ghost backlink" onClick={onCancel}>
+        Cancel
+      </button>
     </div>
   );
 }

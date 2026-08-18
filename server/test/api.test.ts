@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { isSchema } from "./support.js";
 import type { AddressInfo } from "node:net";
 import { createApp } from "../src/index.js";
 import { setGenerate, resetGenerate, type Generate } from "../src/agents/model.js";
-import { requestFromIntentPrompt } from "./support.js";
 import {
   BudgetResultSchema,
   DestinationResultSchema,
@@ -25,7 +25,7 @@ const stub: Generate = (async (
   const call = (data: unknown) => ({ data, model: "stub", ms: 1 });
 
 
-  if (schema === DestinationResultSchema) {
+  if (isSchema(schema, DestinationResultSchema)) {
     return call({
       suggestions: [
         {
@@ -41,7 +41,7 @@ const stub: Generate = (async (
       ],
     });
   }
-  if (schema === ItineraryResultSchema) {
+  if (isSchema(schema, ItineraryResultSchema)) {
     return call({
       destination: "Lisbon",
       days: Array.from({ length: 5 }, (_, i) => ({
@@ -57,7 +57,7 @@ const stub: Generate = (async (
       })),
     });
   }
-  if (schema === BudgetResultSchema) {
+  if (isSchema(schema, BudgetResultSchema)) {
     return call({
       currency: "GBP",
       items: [{ label: "everything", cost: 1200 }],
@@ -119,7 +119,6 @@ test("POST /api/plan streams plan, agent and done events in order", async () => 
     const names = events.map((e) => e.name);
 
     // The routing decision must arrive before any agent, so the UI can show it.
-    // Not necessarily first — the intent step reports itself ahead of it.
     assert.ok(
       names.indexOf("plan") < names.indexOf("agent"),
       "the route is published before any agent starts",
@@ -165,40 +164,6 @@ test("the answer arrives as token events before done, and matches it", async () 
     assert.equal(streamed, answer);
   });
 });
-
-/** Post a turn and return the parse event plus the terminal payload. */
-async function turn(
-  base: string,
-  body: Record<string, unknown>,
-): Promise<{
-  constraints: {
-    origin: string | null;
-    destination: string | null;
-    days: number | null;
-    travellers: number | null;
-    budget: { currency: string | null; max: number } | null;
-    interests: string[];
-  };
-  route: string[];
-  conversationId: string;
-}> {
-  const events = await readSSE(
-    await fetch(`${base}/api/plan`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
-
-  // Find it rather than index it: the intent event now arrives first.
-  const plan = events.find((e) => e.name === "plan")!.data as {
-    constraints: never;
-    route: string[];
-  };
-  const done = events.at(-1)!.data as { conversationId: string };
-
-  return { ...plan, conversationId: done.conversationId };
-}
 
 test("a cost-only request streams exactly one agent event", async () => {
   await withServer(async (base) => {

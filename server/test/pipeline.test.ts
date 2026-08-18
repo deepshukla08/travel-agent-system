@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseRequest } from "../src/tools/parseRequest.js";
 import { route } from "../src/tools/route.js";
 import { buildPipeline } from "../src/graph/pipeline.js";
-import { agentsIn } from "./support.js";
+import { agentsIn, isSchema } from "./support.js";
 import { guardDestination } from "../src/agents/guards.js";
 import { setGenerate, resetGenerate, type Generate } from "../src/agents/model.js";
 import {
@@ -35,7 +35,7 @@ function stubModel(overrides: {
     const call = (data: unknown) => ({ data, model: "stub", ms: 1 });
 
 
-    if (schema === DestinationResultSchema) {
+    if (isSchema(schema, DestinationResultSchema)) {
       return call({
         suggestions: [
           {
@@ -55,7 +55,7 @@ function stubModel(overrides: {
       });
     }
 
-    if (schema === ItineraryResultSchema) {
+    if (isSchema(schema, ItineraryResultSchema)) {
       return call({
         destination: "Lisbon",
         days: Array.from({ length: dayCount }, (_, i) => ({
@@ -72,7 +72,7 @@ function stubModel(overrides: {
       });
     }
 
-    if (schema === BudgetResultSchema) {
+    if (isSchema(schema, BudgetResultSchema)) {
       return call({
         currency: "GBP",
         items,
@@ -173,6 +173,23 @@ test("the form asks only what the message did not already say", async () => {
   assert.equal(out.constraints?.days, 4, "kept, not re-asked");
 });
 
+test("the form is asked once — blank answers plan rather than re-ask", async () => {
+  setGenerate(stubModel());
+
+  // Coming back from the form having filled in nothing is an answer: "you choose".
+  // Asking the same four questions again left the page with no way forward at all.
+  const out = await buildPipeline().invoke({
+    request: "Plan a trip",
+    answers: { from: "", where: "", days: "", budget: "" },
+  });
+
+  assert.deepEqual(out.needs, [], "the questions may not be put twice");
+  assert.ok(
+    out.route.includes("destination"),
+    "with nowhere settled, the agent that picks somewhere must run",
+  );
+});
+
 test("one usable signal is enough to proceed rather than interrogate", async () => {
   setGenerate(stubModel());
 
@@ -190,7 +207,7 @@ test("with no length stated, the Destination Agent's judgement sets it", async (
   const agents = stubModel({ days: 10 });
 
   setGenerate((async (schema, promptText, onToken) => {
-    if (schema === DestinationResultSchema) {
+    if (isSchema(schema, DestinationResultSchema)) {
       return {
         data: {
           suggestions: [
@@ -432,11 +449,10 @@ test("every failing agent still produces an answer explaining what is missing", 
     request: "plan 5 days somewhere warm in Europe under £1500",
   });
 
-  // Every specialist failed. The intent step is exempt: it degrades to the keyword
-  // fallback rather than failing, which is the point of having a fallback.
-  const specialists = out.trace.filter((t) => t.agent !== "intent");
-  assert.ok(specialists.length > 0);
-  assert.ok(specialists.every((t) => !t.ok));
+  // Every agent failed, and each one is still on the trace — a failed agent that
+  // leaves no row is not an audit trail.
+  assert.ok(out.trace.length > 0);
+  assert.ok(out.trace.every((t) => !t.ok));
   assert.match(out.answer, /could not build a plan/i);
 });
 
@@ -458,7 +474,7 @@ function pricePerDay(rate: number): Generate {
     // here loudly rather than silently returning the wrong length.
     const asked = Number(/Produce exactly (\d+) days/.exec(promptText)?.[1] ?? 0);
 
-    if (schema === DestinationResultSchema) {
+    if (isSchema(schema, DestinationResultSchema)) {
       return call({
         suggestions: [
           {
@@ -477,7 +493,7 @@ function pricePerDay(rate: number): Generate {
       });
     }
 
-    if (schema === ItineraryResultSchema) {
+    if (isSchema(schema, ItineraryResultSchema)) {
       const days = asked || 5;
       return call({
         destination: "Lisbon",
@@ -495,7 +511,7 @@ function pricePerDay(rate: number): Generate {
       });
     }
 
-    if (schema === BudgetResultSchema) {
+    if (isSchema(schema, BudgetResultSchema)) {
       // Prices whatever the itinerary just produced, at a flat daily rate.
       const days = [...promptText.matchAll(/^Day (\d+) —/gm)].length;
       const priced = (days || 5) * rate;
