@@ -1,0 +1,603 @@
+/*
+ * Two screens: an ask, and a trip. The brief says not to spend time on visual
+ * polish, so this is a small set of tokens and a document layout — no framework.
+ */
+
+:root {
+  --bg: #faf8f4;
+  --panel: #ffffff;
+  --border: #e7e1d6;
+  --text: #1c1a17;
+  --muted: #77706a;
+  --ink: #17140f;
+  --ok: #2f6b45;
+  --ok-bg: #eef6f0;
+  --warn: #8a6a12;
+  --warn-bg: #fdf6e6;
+  --bad: #a03824;
+  --bad-bg: #fdefec;
+  --tag: #f2eee5;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #14161a;
+  --panel: #1b1e24;
+  --border: #2b303a;
+  --text: #e8eaed;
+  --muted: #98a0ab;
+  --ink: #e8eaed;
+  --ok: #6ee7a0;
+  --ok-bg: rgba(110, 231, 160, 0.08);
+  --warn: #f5c563;
+  --warn-bg: rgba(245, 197, 99, 0.08);
+  --bad: #ff8f7a;
+  --bad-bg: rgba(255, 143, 122, 0.08);
+  --tag: #23272f;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 5rem;
+}
+
+h1 {
+  font-size: clamp(1.6rem, 4vw, 2.25rem);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.5rem;
+}
+
+h2 {
+  font-size: 1.05rem;
+  margin: 0 0 0.6rem;
+}
+
+h3 {
+  font-size: 0.98rem;
+  margin: 0 0 0.35rem;
+}
+
+p {
+  margin: 0 0 0.75rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+.small {
+  font-size: 0.87rem;
+}
+.error {
+  color: var(--bad);
+}
+
+button {
+  padding: 0.7rem 1.3rem;
+  border-radius: 999px;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--bg);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+button.ghost {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 0;
+  font-size: 0.9rem;
+}
+
+button.ghost:hover {
+  color: var(--text);
+}
+
+/* The way out of a screen: never the loudest thing on it, always present. */
+button.backlink {
+  display: block;
+  margin: 1.5rem 0 0.75rem;
+}
+
+.landing > button.backlink {
+  margin: 0 0 1.25rem;
+}
+
+button.chip-btn {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.4rem 0.9rem;
+  font-weight: 400;
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+button.chip-btn:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+
+/* ── Landing ──────────────────────────────────────────────────────────────── */
+
+.lede {
+  color: var(--muted);
+  max-width: 52ch;
+  margin-bottom: 1.5rem;
+}
+
+.ask textarea {
+  width: 100%;
+  padding: 1rem 1.1rem;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.ask textarea:focus-visible {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.ask button {
+  margin-top: 0.85rem;
+}
+
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 2rem;
+}
+
+.recent {
+  margin-top: 3rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1.25rem;
+}
+
+.recent ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.recent button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.5rem 0.7rem;
+  font-weight: 400;
+  text-align: left;
+}
+
+.recent button:hover {
+  border-color: var(--border);
+  background: var(--panel);
+}
+
+.recent__meta {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+/* ── Working ──────────────────────────────────────────────────────────────── */
+
+.working__request {
+  font-size: 1.15rem;
+  margin-bottom: 1rem;
+}
+
+.working__bar {
+  height: 3px;
+  background: var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 1.25rem 0 1rem;
+}
+
+.working__bar-fill {
+  height: 100%;
+  background: var(--ink);
+  transition: width 0.4s ease;
+}
+
+.steps {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.step {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.step--running {
+  border-left-color: var(--ink);
+}
+.step--ok {
+  border-left-color: var(--ok);
+}
+.step--failed {
+  border-left-color: var(--bad);
+}
+
+.step__note {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+/* The tail of the answer being written. Deliberately quiet: it is a sign of
+   life, not something to read — the finished trip is what gets read. */
+.working__prose {
+  margin: 0.9rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  max-height: 3rem;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 40%, transparent);
+}
+
+/* ── Chips ────────────────────────────────────────────────────────────────── */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+}
+
+.chips li {
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  background: var(--tag);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* Hard constraints are what the guards enforce, so they read differently. */
+.chips .chip--hard {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+
+/* ── Trip ─────────────────────────────────────────────────────────────────── */
+
+.trip__head {
+  margin-bottom: 2rem;
+}
+
+.trip__head h1 {
+  margin-top: 0.75rem;
+}
+
+.trip__ask {
+  font-size: 0.95rem;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.1rem 1.3rem;
+  margin-bottom: 1.25rem;
+}
+
+.card ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.card--ok {
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+  background: var(--ok-bg);
+}
+.card--ok h2 {
+  color: var(--ok);
+}
+
+.card--over {
+  border-color: color-mix(in srgb, var(--bad) 40%, var(--border));
+  background: var(--bad-bg);
+}
+.card--over h2 {
+  color: var(--bad);
+}
+
+.card--warn {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: var(--warn-bg);
+}
+
+.alt {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px dashed var(--border);
+}
+
+.suggestion + .suggestion {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+/* ── Days ─────────────────────────────────────────────────────────────────── */
+
+.days {
+  margin: 2rem 0 1.25rem;
+}
+
+.day {
+  display: grid;
+  grid-template-columns: 2.5rem 1fr;
+  gap: 1rem;
+  padding: 1.1rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.day__num {
+  font-family: var(--mono);
+  font-size: 1.4rem;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.day__parts {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0.6rem 0;
+}
+
+.day__parts dt {
+  color: var(--muted);
+  font-size: 0.83rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.day__parts dd {
+  margin: 0;
+}
+
+.day__travel {
+  color: var(--muted);
+  font-size: 0.9rem;
+  border-left: 2px solid var(--border);
+  padding-left: 0.7rem;
+  margin: 0.6rem 0 0;
+}
+
+.day__foot {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.day__flag {
+  color: var(--warn);
+  background: var(--warn-bg);
+  padding: 0.1rem 0.45rem;
+  border-radius: 5px;
+}
+
+/* ── Costs ────────────────────────────────────────────────────────────────── */
+
+.costs {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+}
+
+.costs td {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.costs td:last-child {
+  text-align: right;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.costs__total td {
+  font-weight: 600;
+  border-bottom: none;
+}
+
+/* ── Provenance ───────────────────────────────────────────────────────────── */
+
+.provenance {
+  margin-top: 2.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1.25rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.provenance summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.trace {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  margin: 0.75rem 0;
+  display: block;
+  overflow-x: auto;
+}
+
+.trace th,
+.trace td {
+  text-align: left;
+  padding: 0.25rem 0.6rem 0.25rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.trace--failed td {
+  color: var(--bad);
+}
+
+.guards {
+  padding-left: 1.1rem;
+  color: var(--warn);
+  font-size: 0.87rem;
+}
+
+/* ── Trip form ────────────────────────────────────────────────────────────── */
+
+.tripform {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 1.25rem;
+}
+
+.tripform__field {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.tripform__label {
+  font-size: 0.92rem;
+  font-weight: 500;
+}
+
+.tripform__input {
+  width: 100%;
+  padding: 0.65rem 0.8rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.tripform__input:focus-visible {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.tripform button {
+  justify-self: start;
+}
+
+/* ── Markdown ─────────────────────────────────────────────────────────────── */
+
+.markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+}
+
+.markdown pre {
+  overflow-x: auto;
+  background: var(--tag);
+  padding: 0.75rem;
+  border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* A multi-stop trip: the shape of the route, before the days. */
+.route {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  counter-reset: leg;
+}
+
+.route li {
+  position: relative;
+  padding: 0 0 0.9rem 1.5rem;
+  counter-increment: leg;
+  border-left: 2px solid var(--border);
+}
+
+.route li:last-child {
+  border-left-color: transparent;
+  padding-bottom: 0;
+}
+
+.route li::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 0.5rem;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ink);
+}
+
+.route p {
+  margin: 0.15rem 0 0;
+}

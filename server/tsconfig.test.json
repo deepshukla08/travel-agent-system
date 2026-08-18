@@ -1,0 +1,15 @@
+{
+  // Typechecks the tests alongside src. Separate from tsconfig.json because the
+  // build sets rootDir/outDir and would otherwise compile test files into dist.
+  //
+  // Worth having: a dead import of a function that no longer existed sat in
+  // test/api.test.ts unnoticed, because esbuild silently elides unused imports
+  // at runtime and nothing ever typechecked the directory.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "outDir": null
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
