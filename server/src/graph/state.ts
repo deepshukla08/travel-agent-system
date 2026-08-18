@@ -1,9 +1,11 @@
 import { Annotation } from "@langchain/langgraph";
 import type {
+  Answers,
   BudgetResult,
   Constraints,
   DestinationResult,
   ItineraryResult,
+  Need,
 } from "../schemas/index.js";
 import type { AgentName } from "../tools/route.js";
 
@@ -19,8 +21,12 @@ export interface Trace {
 }
 
 export type GuardedBudget = BudgetResult & {
+  /** "unstated" is not the same as "within" — see guardBudget. */
+  verdict: "within" | "over" | "unstated";
   overBudget: boolean;
   overage: number;
+  /** Budget left unspent. Large headroom means a better trip was affordable. */
+  headroom: number;
 };
 
 /**
@@ -48,18 +54,23 @@ function append<T>() {
   };
 }
 
+/**
+ * One run, start to finish. No conversation state: a request either has enough to
+ * plan from or gets one round of questions, and that is the whole lifecycle.
+ */
 export const TripState = Annotation.Root({
   request: Annotation<string>(replace<string>("")),
 
-  // Filled by tools/, no model involved.
+  /** Field-by-field answers when the request came back through the form. */
+  answers: Annotation<Answers>(replace<Answers>({})),
+
+
+  // Settled by tools/, no model involved.
   constraints: Annotation<Constraints | null>(replace<Constraints | null>(null)),
   route: Annotation<AgentName[]>(replace<AgentName[]>([])),
 
-  /**
-   * Questions to put back to the user when the request cannot be planned at all.
-   * Non-empty means no agent runs and no model is called.
-   */
-  needs: Annotation<string[]>(replace<string[]>([])),
+  /** Questions to put back when the request cannot be planned at all. */
+  needs: Annotation<Need[]>(replace<Need[]>([])),
 
   // One field per agent.
   destination: Annotation<DestinationResult | null>(

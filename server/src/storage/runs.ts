@@ -64,17 +64,11 @@ function addColumn(table: string, column: string, type: string): void {
 }
 
 addColumn("agent_runs", "output", "TEXT");
-addColumn("runs", "conversation_id", "TEXT");
 
-// Grouping a chat's runs back together is the whole point of the column.
-db.exec(
-  `CREATE INDEX IF NOT EXISTS idx_runs_conversation
-     ON runs(conversation_id, created_at)`,
-);
 
 const insertRun = db.prepare(`
-  INSERT INTO runs (id, conversation_id, request, constraints, route, answer, total_ms, guards_fired, created_at)
-  VALUES (@id, @conversation_id, @request, @constraints, @route, @answer, @total_ms, @guards_fired, @created_at)
+  INSERT INTO runs (id, request, constraints, route, answer, total_ms, guards_fired, created_at)
+  VALUES (@id, @request, @constraints, @route, @answer, @total_ms, @guards_fired, @created_at)
 `);
 
 const insertAgentRun = db.prepare(`
@@ -84,8 +78,6 @@ const insertAgentRun = db.prepare(`
 
 export interface SaveRun {
   request: string;
-  /** Which chat this run belongs to. Every turn is a run; a chat is many runs. */
-  conversationId: string;
   constraints: Constraints | null;
   route: string[];
   answer: string;
@@ -105,7 +97,6 @@ export const saveRun = db.transaction((run: SaveRun): string => {
 
   insertRun.run({
     id,
-    conversation_id: run.conversationId,
     request: run.request,
     constraints: JSON.stringify(run.constraints),
     route: JSON.stringify(run.route),
@@ -149,20 +140,9 @@ export type RunRow = Record<string, unknown>;
 export function listRuns(limit = 50): RunRow[] {
   return db
     .prepare(
-      `SELECT id, conversation_id, request, route, total_ms, guards_fired, created_at
+      `SELECT id, request, constraints, route, total_ms, guards_fired, created_at
        FROM runs ORDER BY created_at DESC LIMIT ?`,
     )
     .all(limit) as RunRow[];
 }
 
-/** Every run in one chat, oldest first — the conversation as it was actually run. */
-export function getConversation(conversationId: string) {
-  const runs = db
-    .prepare(
-      `SELECT id, request, route, answer, total_ms, guards_fired, created_at
-         FROM runs WHERE conversation_id = ? ORDER BY created_at`,
-    )
-    .all(conversationId) as RunRow[];
-
-  return runs.length > 0 ? { conversationId, turns: runs } : null;
-}

@@ -1,4 +1,8 @@
-import type { Constraints, HardConstraint } from "../schemas/index.js";
+import type {
+  Answers,
+  Constraints,
+  HardConstraint,
+} from "../schemas/index.js";
 
 /**
  * Pulls constraints out of a plain-language request. Deterministic: a regex and
@@ -102,7 +106,9 @@ function parseAmount(text: string): number | null {
  */
 const CLAUSE = String.raw`(?:[^,.;]|,(?=\d)){1,30}`;
 
-function parseBudget(text: string): { currency: string; max: number } | null {
+function parseBudget(
+  text: string,
+): { currency: string | null; max: number } | null {
   const patterns = [
     new RegExp(
       `(?:under|below|less than|up to|max(?:imum)?|no more than|within)\\s+(${CLAUSE})`,
@@ -121,8 +127,9 @@ function parseBudget(text: string): { currency: string; max: number } | null {
     if (max == null) continue;
 
     // Fall back to the whole request for the currency: "under 1500" often has
-    // its symbol outside the matched fragment.
-    return { currency: findCurrency(fragment) ?? findCurrency(text) ?? "GBP", max };
+    // its symbol outside the matched fragment. Null if it truly is not there —
+    // sterling is not a safe default for a request that never mentioned it.
+    return { currency: findCurrency(fragment) ?? findCurrency(text), max };
   }
 
   return null;
@@ -160,17 +167,182 @@ function parseTravellers(text: string): number | null {
 }
 
 /**
- * Destination is only extracted from an explicit "in/to <Place>". A bare
- * capitalised word is too risky — "Plan A Trip" would become a destination.
+ * Where the trip starts. "from Delhi to Goa" gives both, since origin and
+ * destination use different prepositions and cannot collide.
+ */
+function parseOrigin(text: string): string | null {
+  // Same shape as parseDestination, and lowercase for the same reason — "from
+  // ahmedabad" is how people actually type it.
+  const re =
+    /\b(?:from|out of)\s+((?:(?:the|a|an)\s+)*)([A-Z][a-zA-Z]+(?:[\s-][A-Z][a-zA-Z]+)?|[a-z][a-z]+)/g;
+
+  for (const match of text.matchAll(re)) {
+    const candidate = match[2]?.trim();
+    if (!candidate) continue;
+
+    const lower = candidate.toLowerCase();
+    if (REGIONS.includes(lower)) continue;
+    if (lower.split(/[\s-]/).some((word) => NOT_PLACES.has(word))) continue;
+
+    return candidate;
+  }
+
+  return null;
+}
+
+/**
+ * Words that follow "in"/"to" without being a place. Without this list, "in
+ * February" reads as a trip to February, and "to go somewhere" as a trip to "go".
+ */
+const NOT_PLACES = new Set([
+  // filler and verbs
+  "go", "going", "see", "seeing", "visit", "travel", "travelling", "traveling",
+  "explore", "find", "stay", "eat", "relax", "do", "spend", "get", "have",
+  "escape", "book", "plan", "the", "a", "an", "my", "our", "some", "any",
+  "to", "in", "for", "and", "or",
+  // vague place words — these are constraints, not destinations
+  "somewhere", "anywhere", "nowhere", "abroad", "overseas", "home", "there",
+  ...MONTHS,
+  ...Object.keys(CLIMATE_WORDS),
+]);
+
+/**
+ * Destination is only taken from an explicit "in/to <place>", never from a bare
+ * capitalised word — "Plan A Trip" would otherwise become a destination.
+ *
+ * Lowercase is accepted because people type "i wanna go to udaipur", but only as
+ * a single word: capitalisation is the only reliable signal for a two-word name
+ * like "New York", and without it "to udaipur for" would swallow the "for".
+ * Filler is skipped so "to visit Kyoto" and "to the Algarve" both land.
  */
 function parseDestination(text: string): string | null {
-  const match = /\b(?:in|to|visit(?:ing)?)\s+([A-Z][a-zA-Z]+(?:[\s-][A-Z][a-zA-Z]+)?)/.exec(text);
-  const candidate = match?.[1]?.trim();
-  if (!candidate) return null;
+  const re =
+    /\b(?:in|to|visit(?:ing)?)\s+((?:(?:the|a|an|to|go|see|visit|explore)\s+)*)([A-Z][a-zA-Z]+(?:[\s-][A-Z][a-zA-Z]+)?|[a-z][a-z]+)/g;
 
-  // Regions are constraints, not destinations: "in Europe" means choose one.
-  if (REGIONS.includes(candidate.toLowerCase())) return null;
-  return candidate;
+  for (const match of text.matchAll(re)) {
+    const candidate = match[2]?.trim();
+    if (!candidate) continue;
+
+    const lower = candidate.toLowerCase();
+
+    // Regions are constraints, not destinations: "in Europe" means choose one.
+    if (REGIONS.includes(lower)) continue;
+    if (lower.split(/[\s-]/).some((word) => NOT_PLACES.has(word))) continue;
+
+    return candidate;
+  }
+
+  return null;
+}
+
+/**
+ * Fold form answers over what the free-text parse found.
+ *
+ * Each answer is parsed in the context of its own field, which is the whole point
+ * of keeping them separate: "Lisbon" in the where box is a destination, and "5"
+ * in the days box is five days — neither reads that way in a sentence.
+ *
+ * An unparseable answer ("whatever you suggest") is left as nothing rather than
+ * forced, so the agent assumes a value and discloses it.
+ */
+export function applyAnswers(
+  constraints: Constraints,
+  answers: Answers,
+): Constraints {
+  const merged: Constraints = {
+    ...constraints,
+    hard: [...constraints.hard],
+    interests: [...constraints.interests],
+  };
+
+  if (answers.from) {
+    // The origin box holds a place, so it is taken as one — no need to recognise
+    // a preposition that the form has already made explicit.
+    const parsed = parseRequest(answers.from);
+    merged.origin = parsed.origin ?? parsed.destination ?? answers.from;
+  }
+
+  // Asked and left blank. That is an answer: choose one for me. Without this the
+  // form's origin ("Chandigarh") was the only place in the composed sentence, so
+  // the destination was read from it and the Destination Agent never ran.
+  if (answers.where !== undefined && answers.where.trim() === "") {
+    merged.destination = null;
+  }
+
+  if (answers.where) {
+    const fromWhere = parseRequest(answers.where);
+
+    if (fromWhere.destination) {
+      merged.destination = fromWhere.destination;
+    } else if (fromWhere.hard.length > 0) {
+      // A description, not a place — "somewhere warm in Europe".
+      for (const h of fromWhere.hard) {
+        if (!merged.hard.some((existing) => existing.kind === h.kind)) {
+          merged.hard.push(h);
+        }
+      }
+    } else if (answers.where.split(/\s+/).length <= 4) {
+      // Short, and nothing recognisable in it: take it as a place name. The
+      // Destination Agent copes with "Portugal or Spain" better than we would.
+      merged.destination = answers.where;
+    }
+    merged.interests.push(...fromWhere.interests);
+  }
+
+  // An answer the traveller typed into a box wins outright. Falling back to what
+  // prose found would let a number from an earlier turn override what they just
+  // said: "7 daays" failed to parse and silently kept the "4 days" from a previous
+  // message. Unparseable now means unset, and the agent discloses its assumption.
+  if (answers.days) {
+    merged.days = parseDaysField(answers.days);
+  }
+
+  if (answers.budget !== undefined) {
+    // In a box labelled "what would you like to spend", any amount is the budget —
+    // so this uses the unanchored parser rather than the prose one, which needs a
+    // currency or a word like "under" nearby and so read "5k" as nothing at all.
+    const amount = parseAmount(answers.budget);
+
+    // Currency stays null when unstated rather than defaulting: guessing GBP for
+    // someone typing "5k" on a trip within India is a silent wrong answer, and the
+    // Budget Agent can pick the local currency and say that it did. Null amount
+    // clears any earlier figure, for the same reason as days above.
+    merged.budget = amount
+      ? { currency: findCurrency(answers.budget), max: amount }
+      : null;
+  }
+
+  // Keep the hard constraints consistent with the budget that won.
+  merged.hard = merged.hard.filter((h) => h.kind !== "maxBudget");
+  if (merged.budget) {
+    merged.hard.push({
+      kind: "maxBudget",
+      value: String(merged.budget.max),
+      raw: `${merged.budget.currency} ${merged.budget.max}`,
+    });
+  }
+
+  return merged;
+}
+
+/**
+ * Trip length from the "how long for?" box.
+ *
+ * Lenient on purpose: the box asks one question, so any number in it is the day
+ * count. The prose parser insists on the word "days" nearby, which meant a typo
+ * like "7 daays" parsed to nothing at all.
+ *
+ * Falls back to the prose parser for worded answers — "a week", "long weekend".
+ */
+function parseDaysField(answer: string): number | null {
+  const digits = /(\d{1,3})/.exec(answer);
+  if (digits?.[1]) {
+    const value = Number.parseInt(digits[1], 10);
+    // A sane trip, not a typo'd year or a phone number.
+    if (value > 0 && value <= 90) return value;
+  }
+
+  return parseRequest(answer).days;
 }
 
 export function parseRequest(text: string): Constraints {
@@ -229,6 +401,7 @@ export function parseRequest(text: string): Constraints {
   );
 
   return {
+    origin: parseOrigin(text),
     destination: parseDestination(text),
     days: parseDays(text),
     travellers: parseTravellers(text),

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseRequest } from "../src/tools/parseRequest.js";
+import { applyAnswers, parseRequest } from "../src/tools/parseRequest.js";
+import { missingEssentials } from "../src/tools/route.js";
 
 /** The parser is deterministic, so this is where the cheap confidence lives. */
 
@@ -94,6 +95,27 @@ test("extracts a named destination", () => {
   assert.equal(parseRequest("plan 4 days in Lisbon").destination, "Lisbon");
   assert.equal(parseRequest("a week in New York").destination, "New York");
   assert.equal(parseRequest("I want to visit Kyoto").destination, "Kyoto");
+  assert.equal(parseRequest("trip to the Algarve").destination, "Algarve");
+});
+
+test("a lowercase destination is still a destination", () => {
+  // "i wanna go to udaipur" used to parse to nothing, so the form asked where
+  // they wanted to go immediately after they had said.
+  assert.equal(parseRequest("i wanna go to udaipur").destination, "udaipur");
+  assert.equal(parseRequest("lets go to bali").destination, "bali");
+  assert.equal(
+    parseRequest("trip from ahmedabad to udaipur").origin,
+    "ahmedabad",
+  );
+});
+
+test("a month or a filler word is never mistaken for a place", () => {
+  // "in February" read as a trip TO February, which skipped the Destination Agent
+  // and planned a holiday to a month.
+  assert.equal(parseRequest("somewhere warm in February").destination, null);
+  assert.equal(parseRequest("I want to go somewhere warm").destination, null);
+  assert.equal(parseRequest("looking to escape the cold").destination, null);
+  assert.equal(parseRequest("somewhere warm in Europe").destination, null);
 });
 
 test("collects stated interests", () => {
@@ -101,6 +123,106 @@ test("collects stated interests", () => {
   assert.ok(parsed.interests.includes("food"));
   assert.ok(parsed.interests.includes("markets"));
   assert.ok(parsed.interests.includes("museums"));
+});
+
+test("form answers are trusted over what prose alone would find", () => {
+  // The exact loop this fixes: a bare "Lisbon" in the where box means Lisbon, but
+  // in a sentence it matches nothing, so the form used to re-ask what was answered.
+  const merged = applyAnswers(parseRequest("Plan a trip — Lisbon, 5, 1200"), {
+    where: "Lisbon",
+    days: "5",
+    budget: "1200",
+  });
+
+  assert.equal(merged.destination, "Lisbon");
+  assert.equal(merged.days, 5);
+  // Currency stays null: nobody said pounds, and assuming them is a wrong answer
+  // for a traveller who typed a bare number.
+  assert.deepEqual(merged.budget, { currency: null, max: 1200 });
+  assert.equal(missingEssentials(merged).length, 0, "must not ask again");
+});
+
+test("shorthand amounts in the budget box are understood", () => {
+  // "5k" produced no budget at all: the prose parser wants a currency or a word
+  // like "under" nearby, and neither is present in a field that only holds money.
+  const cases: [string, number, string | null][] = [
+    ["5k", 5000, null],
+    ["10k inr", 10_000, "INR"],
+    ["1 lakh", 100_000, null],
+    ["1 lakh INR", 100_000, "INR"],
+    ["£1,200", 1200, "GBP"],
+    ["2.5k", 2500, null],
+  ];
+
+  for (const [typed, max, currency] of cases) {
+    const merged = applyAnswers(parseRequest("Plan a trip"), {
+      where: "Udaipur",
+      budget: typed,
+    });
+    assert.deepEqual(merged.budget, { currency, max }, `budget box: ${typed}`);
+  }
+});
+
+test("a typo in the days box is still understood", () => {
+  // "7 daays" parsed to nothing, because the prose parser wants the word "days".
+  for (const [typed, want] of [
+    ["7 daays", 7],
+    ["7", 7],
+    ["7 dyas", 7],
+    ["a week", 7],
+    ["long weekend", 3],
+    ["five days", 5],
+  ] as [string, number][]) {
+    const merged = applyAnswers(parseRequest("Plan a trip"), {
+      where: "Udaipur",
+      days: typed,
+    });
+    assert.equal(merged.days, want, `days box: ${typed}`);
+  }
+});
+
+test("an unpriceable budget answer leaves no budget at all", () => {
+  const merged = applyAnswers(parseRequest("Plan a trip"), {
+    where: "Udaipur",
+    budget: "not sure yet",
+  });
+  assert.equal(merged.budget, null);
+});
+
+test("a descriptive where answer becomes constraints, not a place name", () => {
+  const merged = applyAnswers(parseRequest("Plan a trip"), {
+    where: "somewhere warm in Europe",
+  });
+
+  assert.equal(merged.destination, null, "that is not a destination");
+  assert.equal(merged.hard.find((h) => h.kind === "climate")?.value, "warm");
+  assert.equal(merged.hard.find((h) => h.kind === "region")?.value, "europe");
+  assert.equal(missingEssentials(merged).length, 0);
+});
+
+test("a vague answer is left unset so the agent discloses its assumption", () => {
+  const merged = applyAnswers(parseRequest("Plan a trip"), {
+    where: "Lisbon",
+    days: "whatever you suggest",
+    budget: "leave it to you",
+  });
+
+  assert.equal(merged.destination, "Lisbon");
+  // Neither is forced into a number — the Itinerary Agent assumes a length and
+  // says so, which is the honest path.
+  assert.equal(merged.days, null);
+  assert.equal(merged.budget, null);
+});
+
+test("form answers with currency and units still parse", () => {
+  const merged = applyAnswers(parseRequest("Plan a trip"), {
+    where: "Goa",
+    days: "a long weekend",
+    budget: "1 lakh INR",
+  });
+
+  assert.equal(merged.days, 3);
+  assert.deepEqual(merged.budget, { currency: "INR", max: 100_000 });
 });
 
 test("the brief's own example parses completely", () => {

@@ -1,8 +1,41 @@
-import type { PlanEvent, Trace, Constraints, PlanResult, AgentName } from "./types.js";
+import type {
+  AgentName,
+  Constraints,
+  PlanEvent,
+  Trace,
+  TripResult,
+} from "./types.js";
 
 /** Every network call, and nothing else. */
 
 const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
+
+/**
+ * A failed response, said in words a reader can act on.
+ *
+ * The API answers errors as `{"error":"..."}`. Putting that JSON on screen tells
+ * someone planning a holiday nothing, so it is unwrapped, and the cases that are
+ * really about the app being unreachable get said plainly.
+ */
+async function readableError(response: Response): Promise<string> {
+  const body = await response.text().catch(() => "");
+
+  let detail = body;
+  try {
+    const parsed = JSON.parse(body) as { error?: string };
+    if (parsed.error) detail = parsed.error;
+  } catch {
+    // Not JSON — a proxy or gateway page, so the raw text is no better.
+  }
+
+  if (response.status >= 500) {
+    return "Something went wrong on our side. Please try that again.";
+  }
+  if (response.status === 404) {
+    return "I couldn't find that trip.";
+  }
+  return detail || `That didn't go through (${response.status}).`;
+}
 
 /**
  * POST /api/plan and yield each SSE event as it arrives.
@@ -13,22 +46,19 @@ const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
  */
 export async function* streamPlan(
   request: string,
-  /** Earlier turns, oldest first — what makes "make it cheaper" mean something. */
-  history: string[] = [],
-  /** Undefined on the first turn; the server mints one and returns it in `done`. */
-  conversationId?: string,
+  /** Field-by-field answers, when the request came back through the form. */
+  answers?: Record<string, string>,
   signal?: AbortSignal,
 ): AsyncGenerator<PlanEvent> {
   const response = await fetch(`${BASE}/api/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request, history, conversationId }),
+    body: JSON.stringify({ request, answers }),
     signal,
   });
 
   if (!response.ok || !response.body) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(detail || `Request failed (${response.status})`);
+    throw new Error(await readableError(response));
   }
 
   const reader = response.body.getReader();
@@ -77,7 +107,7 @@ function parseFrame(frame: string): PlanEvent | null {
     case "token":
       return { type: "token", text: String(data.text) };
     case "done":
-      return { type: "done", result: data as unknown as PlanResult };
+      return { type: "done", result: data as unknown as TripResult };
     case "error":
       return { type: "error", message: String(data.message) };
     default:
@@ -85,46 +115,38 @@ function parseFrame(frame: string): PlanEvent | null {
   }
 }
 
-export interface RunSummary {
+/** A run as stored, before it is rebuilt into a TripResult. */
+interface StoredRun {
   id: string;
   request: string;
+  constraints: string | null;
   route: string;
-  total_ms: number;
-  guards_fired?: number;
-  created_at: string;
+  answer: string;
+  agents: {
+    agent: AgentName;
+    model: string;
+    ms: number;
+    ok: number;
+    guards: string;
+    output: string | null;
+    error: string | null;
+  }[];
 }
 
 /**
- * GET /api/plan/:id — a stored run, rebuilt into what the chat renders.
+ * GET /api/plan/:id — a stored trip, rebuilt into what the page renders.
  *
- * Every agent's own output was persisted, so a run reopened from the sidebar shows
- * the same banners and thinking as when it was live, not just the prose.
+ * Every agent's output was persisted, so a trip opened from its URL shows exactly
+ * what was generated — banners, day plans, reasoning — without re-running an agent.
+ * That is what makes a trip's link worth having.
  */
-export async function fetchRun(id: string): Promise<{
-  question: string;
-  constraints: Constraints;
-  result: PlanResult;
-}> {
+export async function fetchTrip(
+  id: string,
+): Promise<{ request: string; result: TripResult }> {
   const response = await fetch(`${BASE}/api/plan/${id}`);
-  if (!response.ok) throw new Error(`Could not open that trip (${response.status})`);
+  if (!response.ok) throw new Error(await readableError(response));
 
-  const run = (await response.json()) as {
-    id: string;
-    conversation_id: string | null;
-    request: string;
-    constraints: string;
-    route: string;
-    answer: string;
-    agents: {
-      agent: AgentName;
-      model: string;
-      ms: number;
-      ok: number;
-      guards: string;
-      output: string | null;
-      error: string | null;
-    }[];
-  };
+  const run = (await response.json()) as StoredRun;
 
   const output = (agent: AgentName) => {
     const row = run.agents.find((a) => a.agent === agent);
@@ -132,16 +154,14 @@ export async function fetchRun(id: string): Promise<{
   };
 
   return {
-    question: run.request,
-    constraints: JSON.parse(run.constraints) as Constraints,
+    request: run.request,
     result: {
       runId: run.id,
-      // Null only for runs stored before conversations existed; falling back to
-      // the run id keeps each of those a conversation of one rather than merging
-      // them all under a shared empty key.
-      conversationId: run.conversation_id ?? run.id,
       answer: run.answer,
       route: JSON.parse(run.route) as AgentName[],
+      constraints: run.constraints
+        ? (JSON.parse(run.constraints) as Constraints)
+        : null,
       trace: run.agents.map((a) => ({
         agent: a.agent,
         model: a.model,
@@ -150,6 +170,8 @@ export async function fetchRun(id: string): Promise<{
         guards: JSON.parse(a.guards) as string[],
         error: a.error ?? undefined,
       })),
+      // A stored trip is finished; there is nothing left to ask.
+      needs: [],
       budget: output("budget"),
       itinerary: output("itinerary"),
       destination: output("destination"),
@@ -157,13 +179,21 @@ export async function fetchRun(id: string): Promise<{
   };
 }
 
-/** GET /api/runs — the audit log. `admin` sees every run and the guard counts. */
-export async function fetchRuns(
-  role: "user" | "admin",
-): Promise<{ role: string; runs: RunSummary[] }> {
-  const response = await fetch(`${BASE}/api/runs`, {
-    headers: role === "admin" ? { "x-user-role": "admin" } : {},
-  });
-  if (!response.ok) throw new Error(`Could not load runs (${response.status})`);
-  return response.json() as Promise<{ role: string; runs: RunSummary[] }>;
+export interface RecentTrip {
+  id: string;
+  request: string;
+  constraints: string;
+  route: string;
+  total_ms: number;
+  guards_fired: number;
+  created_at: string;
+}
+
+/** GET /api/plan/recent — past trips, for the landing page. */
+export async function fetchRecent(): Promise<RecentTrip[]> {
+  const response = await fetch(`${BASE}/api/plan/recent`);
+  if (!response.ok) throw new Error(await readableError(response));
+
+  const data = (await response.json()) as { runs: RecentTrip[] };
+  return data.runs;
 }

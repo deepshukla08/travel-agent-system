@@ -1,9 +1,8 @@
 import { Router } from "express";
-import { randomUUID } from "node:crypto";
 import { PlanRequestSchema } from "../schemas/index.js";
 import { pipeline } from "../graph/pipeline.js";
 import type { TripStateType } from "../graph/state.js";
-import { saveRun, getRun, getConversation } from "../storage/runs.js";
+import { saveRun, getRun, listRuns } from "../storage/runs.js";
 import { validate, notFound, wrap } from "./deps.js";
 
 export const planRouter = Router();
@@ -12,8 +11,8 @@ export const planRouter = Router();
  * POST /api/plan — runs the graph, streaming one SSE event per node.
  *
  * Streamed in three modes at once: "updates" carries each node's patch, which is
- * what the activity feed renders live, "custom" carries the answer's tokens as
- * synthesis writes them, and "values" carries the accumulated state, whose last
+ * what the activity view renders live, "custom" carries the answer's prose as
+ * synthesis writes it, and "values" carries the accumulated state, whose last
  * emission is the final result. One pass, no re-running the graph to find out
  * what it produced.
  *
@@ -22,21 +21,7 @@ export const planRouter = Router();
 planRouter.post(
   "/",
   wrap(async (req, res) => {
-    const { request, history, conversationId } = validate(
-      PlanRequestSchema,
-      req.body,
-    );
-
-    // Minted here on the first turn so the client never has to invent one; it
-    // just echoes back whatever `done` gave it.
-    const chatId = conversationId ?? randomUUID();
-
-    // A follow-up ("make it cheaper") means nothing on its own, so the parser and
-    // the agents are given the earlier turns too.
-    //
-    // ponytail: concatenation, not a summariser — a stale number in turn one can
-    // still be picked up. Thread a real conversation state if that starts to bite.
-    const conversation = [...(history ?? []), request].join("\n");
+    const { request, answers } = validate(PlanRequestSchema, req.body);
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -53,7 +38,7 @@ planRouter.post(
 
     try {
       const stream = await pipeline.stream(
-        { request: conversation },
+        { request, answers: answers ?? {} },
         { streamMode: ["updates", "values", "custom"] },
       );
 
@@ -75,7 +60,7 @@ planRouter.post(
           data as Record<string, Partial<TripStateType>>,
         )) {
           // The parse node publishes the routing decision: which agents will run
-          // and what was extracted. The UI needs this before any agent starts.
+          // and what was extracted. The view needs this before any agent starts.
           if (node === "parse") {
             send("plan", { constraints: update.constraints, route: update.route });
             continue;
@@ -101,28 +86,32 @@ planRouter.post(
       return;
     }
 
-    const runId = saveRun({
-      request,
-      conversationId: chatId,
-      constraints: latest.constraints,
-      route: latest.route,
-      answer: latest.answer,
-      totalMs: Date.now() - started,
-      trace: latest.trace,
-      outputs: {
-        destination: latest.destination,
-        itinerary: latest.itinerary,
-        budget: latest.budget,
-      },
-    });
+    // A run that only asked questions is not a trip, so it is not stored — there is
+    // nothing to reopen, and the audit log is for work that was actually done.
+    const runId =
+      latest.needs.length > 0
+        ? null
+        : saveRun({
+            request,
+            constraints: latest.constraints,
+            route: latest.route,
+            answer: latest.answer,
+            totalMs: Date.now() - started,
+            trace: latest.trace,
+            outputs: {
+              destination: latest.destination,
+              itinerary: latest.itinerary,
+              budget: latest.budget,
+            },
+          });
 
     send("done", {
       runId,
-      // The client echoes this back on the next turn, so a chat's runs stay joined.
-      conversationId: chatId,
       answer: latest.answer,
       route: latest.route,
       trace: latest.trace,
+      needs: latest.needs,
+      constraints: latest.constraints,
       budget: latest.budget,
       itinerary: latest.itinerary,
       destination: latest.destination,
@@ -131,26 +120,25 @@ planRouter.post(
   }),
 );
 
-/**
- * GET /api/plan/conversation/:id — every turn of one chat, oldest first.
- *
- * Declared before /:id so "conversation" is not swallowed as a run id.
- */
+/** GET /api/plan/recent — past trips, for the landing page. */
 planRouter.get(
-  "/conversation/:id",
-  wrap(async (req, res) => {
-    const chat = getConversation(String(req.params.id));
-    if (!chat) return notFound(res, "conversation");
-    res.json(chat);
+  "/recent",
+  wrap(async (_req, res) => {
+    res.json({ runs: listRuns(20) });
   }),
 );
 
-/** GET /api/plan/:id — a stored run with its per-agent audit rows. */
+/**
+ * GET /api/plan/:id — a stored trip with its per-agent audit rows.
+ *
+ * This is what makes a trip's URL worth having: it reopens exactly as generated,
+ * banners and reasoning included, without re-running a single agent.
+ */
 planRouter.get(
   "/:id",
   wrap(async (req, res) => {
     const run = getRun(String(req.params.id));
-    if (!run) return notFound(res, "run");
+    if (!run) return notFound(res, "trip");
     res.json(run);
   }),
 );

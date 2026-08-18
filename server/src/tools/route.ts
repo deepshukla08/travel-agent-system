@@ -1,4 +1,4 @@
-import type { Constraints } from "../schemas/index.js";
+import type { Constraints, Need } from "../schemas/index.js";
 
 export const AGENTS = ["destination", "itinerary", "budget"] as const;
 export type AgentName = (typeof AGENTS)[number];
@@ -16,70 +16,108 @@ export type AgentName = (typeof AGENTS)[number];
  * enough to proceed, because a partial answer plus stated assumptions beats an
  * interrogation.
  */
-export function missingEssentials(constraints: Constraints): string[] {
+export function missingEssentials(constraints: Constraints): Need[] {
   // Somewhere to go, or something to choose one by. Either will do.
   const hasSomewhere =
     constraints.destination !== null || constraints.hard.length > 0;
 
   if (hasSomewhere) return [];
 
-  return [
-    "**Where**, or what kind of place? A city, a region, or just “somewhere warm and walkable”.",
-    "**How long** is the trip?",
-    "**Roughly what budget**, in total? A number or a band is fine.",
-  ];
+  // Ask only what is genuinely unknown. "plan me a trip from ahmedabad for 4 days"
+  // used to be answered with all four questions, origin and length included —
+  // which reads as not having listened.
+  const unknown = (id: Need["id"]): boolean => {
+    switch (id) {
+      case "from":
+        return constraints.origin === null;
+      case "days":
+        return constraints.days === null;
+      case "budget":
+        return constraints.budget === null;
+      case "where":
+        // Unknown by definition: a known destination would have returned above.
+        return true;
+    }
+  };
+
+  return QUESTIONS.filter((q) => unknown(q.id));
 }
 
 /**
- * Decides which agents a request needs.
+ * Worded for a traveller, not a developer. Every hint says an approximate answer
+ * is welcome, because the parser handles vagueness and the agents disclose
+ * whatever they had to assume.
+ */
+const QUESTIONS: Need[] = [
+  {
+    id: "from",
+    label: "Where are you travelling from?",
+    hint: "Your nearest city or airport — it drives the flight cost",
+  },
+  {
+    id: "where",
+    label: "Where would you like to go?",
+    hint: "A city, a country, or just the feel of it — “somewhere warm and walkable”",
+  },
+  {
+    id: "days",
+    label: "How long for?",
+    hint: "A number of days, or a long weekend — happy to suggest one",
+  },
+  {
+    id: "budget",
+    label: "Roughly what would you like to spend?",
+    hint: "A rough total for the trip — or leave it to me",
+  },
+];
+
+
+/**
+ * Asks about money and nothing else. Narrow on purpose.
  *
- * Deterministic, from the parsed constraints — so "roughly what does a week in
- * Rome cost?" provably calls Budget alone. If every query ran all three this
- * would be a pipeline, not an orchestrator, and the orchestrator is the thing
- * being graded.
+ * This is the only phrase-matching left in routing, and it can only ever *remove*
+ * an agent — so a miss means the traveller gets a plan they did not ask for, never
+ * a misread request. That is why a regex is safe here and was not safe as a
+ * general intent classifier, where "iternary?" silently changed which agents ran.
+ */
+const COST_ONLY =
+  /\b(how much|what would .*\bcost|what does .*\bcost|cost\?|ballpark|rough(?:ly)? (?:cost|price))\b/i;
+
+/** Asks only where to go — choosing, not booking. */
+const IDEAS_ONLY =
+  /\b(where should i go|where to go|any ideas|suggest somewhere|recommend somewhere)\b/i;
+
+/**
+ * Which agents this request needs, in dependency order.
  *
- * Order is fixed by dependency: Itinerary needs somewhere to go, Budget prices
- * whatever exists. A route is always a subset of AGENTS in AGENTS order.
+ * Entirely deterministic and free: no model call decides the route, so every
+ * routing decision is unit-testable — which is the whole reason the brief puts
+ * this in tools/ rather than in an agent.
+ *
+ * The default is to plan. Someone describing a trip wants it planned without
+ * having to say the word "itinerary"; the two patterns above are the only things
+ * that narrow it, and both only ever subtract.
  */
 export function route(text: string, constraints: Constraints): AgentName[] {
-  const lower = text.toLowerCase();
-
-  const asksCost = /\bcost|budget|price|cheap|afford|expensive|how much|spend\b/.test(lower);
-  const asksPlan = /\bitinerary|plan|schedule|day[- ]by[- ]day|what to do|things to do|see and do\b/.test(lower);
-  const asksWhere = /\bwhere|which (?:city|country|place)|suggest|recommend|ideas?|somewhere|anywhere\b/.test(lower);
-
-  // Cost-only: asks about money, wants no plan, and already knows the place.
-  const costOnly = asksCost && !asksPlan && !asksWhere && constraints.destination !== null;
-  if (costOnly) return ["budget"];
-
-  // Where-only: wants suggestions and nothing more.
-  //
-  // Phrasing alone is not enough here. "a five day trip somewhere warm in Europe
-  // for under £1500" contains "somewhere" but states a length and a budget, which
-  // means they want the plan priced too — so a stated length or budget disqualifies
-  // this shortcut regardless of wording.
-  const wantsOnlyIdeas =
-    asksWhere &&
-    !asksPlan &&
-    !asksCost &&
-    constraints.days === null &&
-    constraints.budget === null;
-  if (wantsOnlyIdeas) return ["destination"];
-
   const agents: AgentName[] = [];
 
-  // Somewhere to go is a precondition for everything else, so an unknown
-  // destination forces this agent in regardless of phrasing.
-  if (constraints.destination === null || asksWhere) agents.push("destination");
+  // Somewhere to go is a precondition for everything else.
+  if (constraints.destination === null) agents.push("destination");
 
-  if (asksPlan || constraints.days !== null) agents.push("itinerary");
+  const costOnly = COST_ONLY.test(text);
 
-  // Price the plan whenever one was built, even if cost went unmentioned: a
-  // day-by-day plan with no idea of its cost is half an answer.
-  if (asksCost || constraints.budget !== null || agents.includes("itinerary")) {
-    agents.push("budget");
-  }
+  // Only treat it as pure browsing when nothing about the trip itself was stated:
+  // "where should I go for 5 days on £900" is a request to plan, not to browse.
+  const ideasOnly =
+    IDEAS_ONLY.test(text) &&
+    constraints.days === null &&
+    constraints.budget === null;
 
-  // Nothing matched — treat it as a full planning request rather than guessing.
-  return agents.length > 0 ? agents : [...AGENTS];
+  if (!costOnly && !ideasOnly) agents.push("itinerary");
+
+  // Price whatever was planned, and answer a cost question even when nothing was.
+  if (!ideasOnly) agents.push("budget");
+
+  // Browsing with a destination already named leaves nothing to do but reconsider.
+  return agents.length > 0 ? agents : ["destination"];
 }

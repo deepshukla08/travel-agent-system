@@ -105,6 +105,76 @@ test("budget guard notes an alternative that still does not fit", () => {
   assert.ok(fired.some((f) => /alternative still over budget/.test(f)));
 });
 
+test("budget guard flags a flight priced from nowhere", () => {
+  // The real failure this came from: the model returned "Flights (Return from UK
+  // to Tenerife)" for a traveller who never said where they start. Flights are the
+  // biggest line, so an unstated origin makes the total a guess.
+  const result: BudgetResult = {
+    currency: "GBP",
+    items: [
+      { label: "Flights (Return from UK)", cost: 150 },
+      { label: "hotel", cost: 400 },
+    ],
+    total: 550,
+    alternative: null,
+    assumptions: [],
+  };
+
+  const { fired } = guardBudget(result, constraints);
+  assert.ok(
+    fired.some((f) => /without a stated departure point/.test(f)),
+    "an invented origin must not pass silently",
+  );
+});
+
+test("budget guard stays quiet about flights once an origin is known", () => {
+  const withOrigin = { ...constraints, origin: "Ahmedabad" };
+  const result: BudgetResult = {
+    currency: "GBP",
+    items: [{ label: "Flights", cost: 150 }],
+    total: 150,
+    alternative: null,
+    assumptions: [],
+  };
+
+  const { fired } = guardBudget(result, withOrigin);
+  assert.ok(!fired.some((f) => /departure point/.test(f)));
+});
+
+test("no stated budget yields 'unstated', never 'within'", () => {
+  // The UI read !overBudget as "within budget" and announced that a 18,500 INR
+  // trip fitted a budget the traveller had never given.
+  const noBudget = parseRequest("plan 5 days in Jaipur");
+  const result: BudgetResult = {
+    currency: "INR",
+    items: [{ label: "everything", cost: 18_500 }],
+    total: 18_500,
+    alternative: null,
+    assumptions: [],
+  };
+
+  const { value } = guardBudget(result, noBudget);
+  assert.equal(value.verdict, "unstated");
+  assert.notEqual(value.verdict, "within", "nothing to be within");
+});
+
+test("the three budget verdicts are distinct", () => {
+  const priced = (cost: number): BudgetResult => ({
+    currency: "GBP",
+    items: [{ label: "everything", cost }],
+    total: cost,
+    alternative: { summary: "s", changes: ["c"], newTotal: 1 },
+    assumptions: [],
+  });
+
+  assert.equal(guardBudget(priced(1200), constraints).value.verdict, "within");
+  assert.equal(guardBudget(priced(2100), constraints).value.verdict, "over");
+  assert.equal(
+    guardBudget(priced(2100), parseRequest("plan 5 days in Jaipur")).value.verdict,
+    "unstated",
+  );
+});
+
 test("budget guard gives no verdict when no budget was stated", () => {
   const noBudget = parseRequest("plan 5 days in Lisbon");
   const result: BudgetResult = {
@@ -121,6 +191,38 @@ test("budget guard gives no verdict when no budget was stated", () => {
   assert.equal(value.overage, 0);
 });
 
+test("budget guard flags a plan that spends a fraction of the budget", () => {
+  // The real failure: 100,000 INR from Ahmedabad came back as a 37,000 INR bus
+  // trip to Udaipur, labelled "within budget" as if that were a success.
+  const hundredK = parseRequest("plan a trip from Ahmedabad, on a budget of 100000 INR");
+  const result: BudgetResult = {
+    currency: "INR",
+    items: [{ label: "everything", cost: 37_000 }],
+    total: 37_000,
+    alternative: null,
+    assumptions: [],
+  };
+
+  const { value, fired } = guardBudget(result, hundredK);
+  assert.equal(value.verdict, "within");
+  assert.equal(value.headroom, 63_000);
+  assert.ok(fired.some((f) => /uses only 37%/.test(f)));
+});
+
+test("budget guard leaves a well-used budget alone", () => {
+  const result: BudgetResult = {
+    currency: "GBP",
+    items: [{ label: "everything", cost: 1400 }],
+    total: 1400,
+    alternative: null,
+    assumptions: [],
+  };
+
+  const { value, fired } = guardBudget(result, constraints);
+  assert.equal(value.headroom, 100);
+  assert.ok(!fired.some((f) => /uses only/.test(f)));
+});
+
 // ── Destination ──────────────────────────────────────────────────────────────
 
 test("destination guard drops a suggestion that breaks a hard constraint", () => {
@@ -129,6 +231,8 @@ test("destination guard drops a suggestion that breaks a hard constraint", () =>
       {
         name: "Reykjavik",
         country: "Iceland",
+        legs: [{ place: "x", nights: 5, note: "n" }],
+        suggestedDays: 5,
         justification: longEnough,
         constraintChecks: [
           { kind: "climate", passes: false, reason: "cold in May" },
@@ -138,6 +242,8 @@ test("destination guard drops a suggestion that breaks a hard constraint", () =>
       {
         name: "Lisbon",
         country: "Portugal",
+        legs: [{ place: "x", nights: 5, note: "n" }],
+        suggestedDays: 5,
         justification: longEnough,
         constraintChecks: [
           { kind: "climate", passes: true, reason: "22C in May" },
@@ -162,6 +268,8 @@ test("destination guard independently rejects a suggestion over budget", () => {
       {
         name: "Maldives",
         country: "Maldives",
+        legs: [{ place: "x", nights: 5, note: "n" }],
+        suggestedDays: 5,
         justification: longEnough,
         // The model claims it passes the budget check. Arithmetic disagrees.
         constraintChecks: [
@@ -180,12 +288,59 @@ test("destination guard independently rejects a suggestion over budget", () => {
   );
 });
 
+test("destination guard drops a place they asked to move on from", () => {
+  // "Any other destination you can suggest?" and Udaipur comes back — the exact
+  // failure. Checked by name, not left to the model's own verdict.
+  const wantsElsewhere: Constraints = {
+    ...constraints,
+    destination: null,
+    hard: [
+      { kind: "avoid", value: "Udaipur", raw: "asked for somewhere other than Udaipur" },
+    ],
+  };
+
+  const result: DestinationResult = {
+    suggestions: [
+      {
+        name: "Udaipur",
+        country: "India",
+        legs: [{ place: "x", nights: 5, note: "n" }],
+        suggestedDays: 5,
+        justification: longEnough,
+        // Claims it passes. It does not.
+        constraintChecks: [{ kind: "avoid", passes: true, reason: "lovely lakes" }],
+        estimatedTotalCost: 900,
+      },
+      {
+        name: "Jaipur",
+        country: "India",
+        legs: [{ place: "x", nights: 5, note: "n" }],
+        suggestedDays: 5,
+        justification: longEnough,
+        constraintChecks: [{ kind: "avoid", passes: true, reason: "not Udaipur" }],
+        estimatedTotalCost: 900,
+      },
+    ],
+  };
+
+  const { value, fired } = guardDestination(result, wantsElsewhere);
+
+  assert.deepEqual(
+    value.suggestions.map((s) => s.name),
+    ["Jaipur"],
+    "the rejected place must not be re-offered",
+  );
+  assert.ok(fired.some((f) => /asked for somewhere else/.test(f)));
+});
+
 test("destination guard rejects a justification too thin to defend", () => {
   const result: DestinationResult = {
     suggestions: [
       {
         name: "Lisbon",
         country: "Portugal",
+        legs: [{ place: "x", nights: 5, note: "n" }],
+        suggestedDays: 5,
         justification: "Nice city.", // marketing copy, not an argument
         constraintChecks: [],
         estimatedTotalCost: 1200,
@@ -206,6 +361,7 @@ function day(overrides: Partial<ItineraryResult["days"][number]> = {}) {
     afternoon: "walk",
     evening: "dinner",
     travelNotes: "20 min metro from the airport",
+    estimatedSpend: 40,
     uncertain: false,
     uncertaintyReason: null,
     ...overrides,

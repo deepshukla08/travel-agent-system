@@ -22,6 +22,24 @@ Break the cost into `items` — flights, accommodation, food, local transport, a
 miscellaneous — each with a `cost` in {{currency}}, covering the whole trip and all
 travellers. `total` must be the sum of those items.
 
+## Flights
+
+Flights are usually the largest single cost, and they depend entirely on where the traveller
+starts. Look at "travelling from" above.
+
+If it is stated, price the flight from there.
+
+If it is NOT stated, do not quietly pick a country. Say which origin you priced in
+`assumptions`, in plain words — "assumes departure from a major Indian metro" — so the reader
+can see the figure rests on a guess and correct it. A total built on an unstated origin that
+looks certain is the same dishonesty as shading the numbers to fit.
+
+## Trips that move
+
+If the plan visits more than one place, price the travel between them as its own line —
+trains, internal flights, transfers. It is a real cost and a multi-stop trip that only prices
+the arrival flight is understated, which is the failure this agent exists to prevent.
+
 The total is recomputed from your items by arithmetic afterwards, and whether the trip fits is
 decided by that arithmetic, not by you. So there is nothing to gain from shading the numbers —
 an inconsistent total is simply corrected.

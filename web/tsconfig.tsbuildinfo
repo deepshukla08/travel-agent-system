@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/main.tsx","./src/components/agentactivity.tsx","./src/components/answer.tsx","./src/components/sidebar.tsx","./src/lib/api.ts","./src/lib/types.ts"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/main.tsx","./src/components/promptpage.tsx","./src/components/tripform.tsx","./src/components/trippage.tsx","./src/components/working.tsx","./src/lib/api.ts","./src/lib/debug.ts","./src/lib/types.ts"],"version":"5.9.3"}

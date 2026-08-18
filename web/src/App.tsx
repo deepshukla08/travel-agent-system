@@ -1,362 +1,207 @@
-import { useEffect, useRef, useState } from "react";
-import { fetchRun, streamPlan } from "./lib/api.js";
-import type { AgentName, Constraints, PlanResult, Trace } from "./lib/types.js";
-import { AgentActivity } from "./components/AgentActivity.js";
-import { Answer } from "./components/Answer.js";
-import { Sidebar } from "./components/Sidebar.js";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { fetchTrip, streamPlan } from "./lib/api.js";
+import { debugRun } from "./lib/debug.js";
+import type { AgentName, Constraints, Trace, TripResult } from "./lib/types.js";
+import { PromptPage } from "./components/PromptPage.js";
+import { TripForm } from "./components/TripForm.js";
+import { TripPage } from "./components/TripPage.js";
+import { Working } from "./components/Working.js";
 
-const EXAMPLES = [
-  "A five day trip somewhere warm in Europe for under £1500",
-  "Plan 4 days in Lisbon for 2 people",
-  "Roughly what does a week in Rome cost?",
-  "Where should I go for a warm February break?",
-];
+/**
+ * One request in, one trip out.
+ *
+ * Deliberately not a chat. This was a conversation with carried constraints and
+ * follow-up routing, and nearly every defect lived there — a forgotten budget, a
+ * destination silently replaced, an aside becoming a travel preference. The brief
+ * asks for a request and a synthesised answer, so that is the whole shape: ask,
+ * watch the agents work, read the trip.
+ */
 
-const FOLLOW_UPS = [
-  "Make it cheaper",
-  "Add a day trip",
-  "Swap a day for something quieter",
-];
+/**
+ * A trip gets a URL so it can be reopened and shared. The History API is enough
+ * for two screens — a router would be a dependency for one route.
+ */
+function useTripId(): [string | null, (id: string | null) => void] {
+  const read = () => /^\/trip\/([\w-]+)/.exec(window.location.pathname)?.[1] ?? null;
+  const [id, setId] = useState<string | null>(read);
 
-/** How many earlier messages a follow-up carries. Enough context, bounded cost. */
-const CONTEXT_TURNS = 6;
+  useEffect(() => {
+    const onPop = () => setId(read());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
-/** One exchange: what was asked, and everything the run streamed back for it. */
-interface Turn {
-  id: string;
-  question: string;
-  constraints: Constraints | null;
-  route: AgentName[];
-  trace: Trace[];
-  /** The answer as it arrives, before `done` delivers the authoritative copy. */
-  streamed: string;
-  result: PlanResult | null;
-  error: string | null;
-  running: boolean;
+  const go = useCallback((next: string | null) => {
+    window.history.pushState({}, "", next ? `/trip/${next}` : "/");
+    setId(next);
+  }, []);
+
+  return [id, go];
 }
 
 export default function App() {
-  const [turns, setTurns] = useState<Turn[]>([]);
-  const [draft, setDraft] = useState("");
-  const [running, setRunning] = useState(false);
-  const [menu, setMenu] = useState(false);
+  const [tripId, goto] = useTripId();
 
-  // index.html stamps the starting choice before first paint — read it rather
-  // than guess, or a dark-mode reader gets a white flash on every load.
-  const [theme, setTheme] = useState(
-    () => document.documentElement.dataset.theme ?? "light",
-  );
+  const [request, setRequest] = useState("");
+  const [running, setRunning] = useState(false);
+  const [constraints, setConstraints] = useState<Constraints | null>(null);
+  const [route, setRoute] = useState<AgentName[]>([]);
+  const [trace, setTrace] = useState<Trace[]>([]);
+  const [result, setResult] = useState<TripResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const abort = useRef<AbortController | null>(null);
-  const end = useRef<HTMLDivElement>(null);
 
-  // Minted by the server on the first turn and echoed back after, so every run
-  // in this chat is stored against one conversation instead of standing alone.
-  const conversation = useRef<string | undefined>(undefined);
-
-  // Every token is a new render, so this keeps the newest prose in view as it is
-  // written — the same reason a chat scrolls itself.
+  // Opening /trip/:id directly, or coming back to it, loads the stored trip.
   useEffect(() => {
-    end.current?.scrollIntoView({ block: "end" });
-  }, [turns]);
+    if (!tripId || result?.runId === tripId) return;
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem("theme", theme);
-  }, [theme]);
+    let cancelled = false;
+    fetchTrip(tripId)
+      .then(({ request: asked, result: stored }) => {
+        if (cancelled) return;
+        setRequest(asked);
+        setResult(stored);
+        setConstraints(stored.constraints);
+        setRoute(stored.route);
+        setTrace(stored.trace);
+        setError(null);
+      })
+      .catch((err: Error) => !cancelled && setError(err.message));
 
-  async function submit(text: string) {
-    const question = text.trim();
-    if (!question || running) return;
+    return () => {
+      cancelled = true;
+    };
+  }, [tripId, result?.runId]);
 
-    const id = crypto.randomUUID();
-    const history = turns.map((t) => t.question).slice(-CONTEXT_TURNS);
+  function reset() {
+    abort.current?.abort();
+    setRequest("");
+    setConstraints(null);
+    setRoute([]);
+    setTrace([]);
+    setResult(null);
+    setError(null);
+    goto(null);
+  }
 
-    setDraft("");
-    setMenu(false);
+  async function plan(text: string, answers?: Record<string, string>) {
+    const asked = text.trim();
+    if (!asked || running) return;
+
+    setRequest(asked);
     setRunning(true);
-    setTurns((prev) => [
-      ...prev,
-      {
-        id,
-        question,
-        constraints: null,
-        route: [],
-        trace: [],
-        streamed: "",
-        result: null,
-        error: null,
-        running: true,
-      },
-    ]);
-
-    const patch = (change: (turn: Turn) => Partial<Turn>) =>
-      setTurns((prev) =>
-        prev.map((t) => (t.id === id ? { ...t, ...change(t) } : t)),
-      );
+    setError(null);
+    setResult(null);
+    setConstraints(null);
+    setRoute([]);
+    setTrace([]);
 
     const controller = new AbortController();
     abort.current = controller;
+    const log = debugRun(asked);
 
     try {
-      for await (const event of streamPlan(
-        question,
-        history,
-        conversation.current,
-        controller.signal,
-      )) {
+      for await (const event of streamPlan(asked, answers, controller.signal)) {
+        log.event(event);
+
         switch (event.type) {
           case "plan":
-            patch(() => ({
-              constraints: event.constraints,
-              route: event.route,
-            }));
+            setConstraints(event.constraints);
+            setRoute(event.route);
             break;
           case "agent":
-            patch((t) => ({ trace: [...t.trace, event.trace] }));
-            break;
-          case "token":
-            patch((t) => ({ streamed: t.streamed + event.text }));
+            setTrace((prev) => [...prev, event.trace]);
             break;
           case "done":
-            conversation.current = event.result.conversationId;
-            patch(() => ({ result: event.result }));
+            setResult(event.result);
+            // A trip that was actually planned gets a URL; a set of questions
+            // does not — there is nothing stored to reopen.
+            if (event.result.runId) goto(event.result.runId);
             break;
           case "error":
-            patch(() => ({ error: event.message }));
+            setError(event.message);
+            break;
+          case "token":
+            // Prose arrives for the debug console; the page renders from the
+            // finished result.
             break;
         }
       }
     } catch (err) {
-      // An abort is the user's own doing — whatever streamed already stands.
       if (!controller.signal.aborted) {
-        patch(() => ({
-          error: err instanceof Error ? err.message : "Something went wrong.",
-        }));
+        const message = describeFailure(err);
+        log.fail(message);
+        setError(message);
       }
     } finally {
-      patch(() => ({ running: false }));
       setRunning(false);
       abort.current = null;
     }
   }
 
-  /** Opening a past trip replaces the thread, the way switching chats does. */
-  async function openRun(runId: string) {
-    if (running) return;
-    setMenu(false);
-
-    try {
-      const { question, constraints, result } = await fetchRun(runId);
-      setTurns([
-        {
-          id: result.runId,
-          question,
-          constraints,
-          route: result.route,
-          trace: result.trace,
-          streamed: "",
-          result,
-          error: null,
-          running: false,
-        },
-      ]);
-    } catch (err) {
-      setTurns([
-        {
-          id: runId,
-          question: "that trip",
-          constraints: null,
-          route: [],
-          trace: [],
-          streamed: "",
-          result: null,
-          error: err instanceof Error ? err.message : "Could not open that trip.",
-          running: false,
-        },
-      ]);
-    }
-  }
-
-  const last = turns.at(-1);
-  const canFollowUp = Boolean(last && !last.running && !last.error);
-  const finished = turns.filter((t) => t.result).length;
+  const asking = result?.needs.length ? result.needs : null;
 
   return (
-    <div className={`shell${menu ? " shell--menu" : ""}`}>
-      <Sidebar
-        activeId={last?.result?.runId}
-        reload={finished}
-        onOpen={(id) => void openRun(id)}
-        onNew={() => {
-          setTurns([]);
-          setMenu(false);
-        }}
-      />
+    <div className="app">
+      {running && (
+        <Working
+          request={request}
+          constraints={constraints}
+          route={route}
+          trace={trace}
+        />
+      )}
 
-      <div className="main">
-        <header className="topbar">
-          <button
-            type="button"
-            className="ghost menu"
-            onClick={() => setMenu(!menu)}
-            aria-label="Past trips"
-          >
-            ☰
+      {!running && error && (
+        <div className="landing">
+          <h1>That didn't work</h1>
+          <p className="error">{error}</p>
+          <button type="button" onClick={reset}>
+            Start again
           </button>
+        </div>
+      )}
 
-          <div className="topbar__title">
-            <strong>{last ? last.question : "New trip"}</strong>
-            <span className="muted tiny">
-              Three specialised agents. An orchestrator picks the ones your request
-              needs.
-            </span>
-          </div>
+      {/* Too vague to plan: ask once, with a form, then generate. */}
+      {!running && !error && asking && (
+        <div className="landing">
+          <h1>Nearly there</h1>
+          <p className="lede">{result?.answer}</p>
+          <TripForm
+            needs={asking}
+            disabled={running}
+            onSubmit={(text, answers) => void plan(text, answers)}
+          />
+        </div>
+      )}
 
-          <button
-            type="button"
-            className="ghost themetoggle"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            title={theme === "dark" ? "Switch to light" : "Switch to dark"}
-            aria-label="Toggle dark mode"
-          >
-            {theme === "dark" ? "☀" : "☾"}
-          </button>
+      {!running && !error && !asking && result && (
+        <TripPage request={request} result={result} onNew={reset} />
+      )}
 
-          <span className={`status${running ? " status--busy" : ""}`}>
-            <i aria-hidden="true" />
-            {running ? "planning" : "online"}
-          </span>
-        </header>
-
-        <main className="thread">
-          {turns.length === 0 && (
-            <section className="hero">
-              <h1>Where are we going?</h1>
-              <p className="muted">
-                Tell me how long, who is coming and what you want to spend. I will
-                put the agents to work and show their thinking as it happens.
-              </p>
-              <div className="suggestions">
-                {EXAMPLES.map((example) => (
-                  <button
-                    key={example}
-                    type="button"
-                    className="chip"
-                    onClick={() => void submit(example)}
-                  >
-                    {example}
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {turns.map((turn) => (
-            <div key={turn.id} className="exchange">
-              <article className="msg msg--me">
-                <div className="bubble">{turn.question}</div>
-              </article>
-
-              <article className="msg msg--bot">
-                <span className="avatar" aria-hidden="true">
-                  ✈
-                </span>
-                <div className="bubble">
-                  <AgentActivity
-                    constraints={turn.constraints}
-                    route={turn.route}
-                    trace={turn.trace}
-                    running={turn.running}
-                  />
-
-                  {turn.error && <p className="error">{turn.error}</p>}
-
-                  {(turn.result ?? turn.streamed) && (
-                    <Answer
-                      result={turn.result}
-                      markdown={turn.result?.answer ?? turn.streamed}
-                      streaming={turn.running}
-                    />
-                  )}
-
-                  {turn.running && !turn.streamed && !turn.error && (
-                    <span className="dots" aria-label="working">
-                      <i />
-                      <i />
-                      <i />
-                    </span>
-                  )}
-                </div>
-              </article>
-            </div>
-          ))}
-
-          {canFollowUp && (
-            <div className="suggestions suggestions--inline">
-              {FOLLOW_UPS.map((f) => (
-                <button
-                  key={f}
-                  type="button"
-                  className="chip"
-                  onClick={() => void submit(f)}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <div ref={end} />
-        </main>
-
-        <form
-          className="composer"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void submit(draft);
-          }}
-        >
-          <div className="composer__box">
-            <textarea
-              value={draft}
-              rows={1}
-              placeholder="Ask for a trip, or change the one above…"
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                // Enter sends, Shift+Enter is a new line — chat convention.
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void submit(draft);
-                }
-              }}
-            />
-
-            {running ? (
-              <button
-                type="button"
-                className="round"
-                onClick={() => abort.current?.abort()}
-                title="Stop"
-              >
-                ■
-              </button>
-            ) : (
-              <button
-                type="submit"
-                className="round"
-                disabled={!draft.trim()}
-                title="Send"
-              >
-                ↑
-              </button>
-            )}
-          </div>
-          <p className="muted tiny composer__note">
-            Enter to send · Shift+Enter for a new line
-          </p>
-        </form>
-      </div>
+      {!running && !error && !asking && !result && (
+        <PromptPage
+          disabled={running}
+          onSubmit={(text) => void plan(text)}
+          onOpen={goto}
+        />
+      )}
     </div>
   );
+}
+
+/**
+ * A thrown stream failure, said in words.
+ *
+ * A dropped connection surfaces as "network error" or "Failed to fetch", which
+ * reads like a bug report rather than something a reader can act on.
+ */
+function describeFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message : "";
+
+  if (/network error|failed to fetch|load failed/i.test(message)) {
+    return "Lost the connection to the planner. It may still be starting up — try again in a moment.";
+  }
+  return message || "Something went wrong. Please try again.";
 }

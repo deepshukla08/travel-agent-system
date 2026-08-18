@@ -13,7 +13,13 @@ import { describeConstraints } from "./format.js";
  */
 export async function budgetAgent(state: TripStateType) {
   const constraints = state.constraints!;
-  const currency = constraints.budget?.currency ?? "GBP";
+
+  // Unstated currency is passed to the model as a decision to make, not papered
+  // over with a default. "5k" for a trip inside India is not 5,000 pounds.
+  const stated = constraints.budget?.currency ?? null;
+  const currency =
+    stated ??
+    `the local currency of ${constraints.origin ?? constraints.destination ?? "the trip"} — state which you chose in assumptions`;
 
   const destination =
     constraints.destination ?? state.destination?.suggestions[0]?.name ?? null;
@@ -29,9 +35,14 @@ export async function budgetAgent(state: TripStateType) {
         .join("\n")}`
     : `## No itinerary was built\n\nEstimate for ${destination ?? "the destination"} over ${constraints.days ?? "the stated"} days from general knowledge, and say so in assumptions.`;
 
-  const budgetLine = constraints.budget
-    ? `The traveller's budget is ${constraints.budget.max} ${constraints.budget.currency} in total. Report every cost in ${constraints.budget.currency} so it can be compared directly.`
-    : `No budget was stated. Estimate realistically and set alternative to null.`;
+  const budgetLine = !constraints.budget
+    ? `No budget was stated. Estimate realistically and set alternative to null.`
+    : stated
+      ? `The traveller's budget is ${constraints.budget.max} ${stated} in total. Report every cost in ${stated} so it can be compared directly.`
+      : `The traveller's budget is ${constraints.budget.max} in total, but they did not say which currency.
+Decide the currency that obviously fits this trip — the local one where they are travelling from
+or to — report every cost in it, set "currency" to that code, and name the choice in
+"assumptions". Do not default to US dollars or sterling out of habit.`;
 
   const { data, model, ms } = await generate(
     BudgetResultSchema,

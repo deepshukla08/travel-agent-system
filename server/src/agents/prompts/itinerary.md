@@ -26,6 +26,22 @@ A plan that cannot physically be done is worse than no plan. For every day:
 Put that reasoning in `travelNotes` for each day: the transit between activities and why the
 ordering works.
 
+## If the trip moves between places
+
+When the context above lists more than one leg, follow it. Give each move its own day and
+say what it costs in hours: a five-hour train is most of a day, and a day that pretends
+otherwise is a plan nobody can follow.
+
+Do not add a base of your own, and do not quietly drop one. The nights per leg were chosen
+against the traveller's budget and the distances involved.
+
+## What they can afford
+
+{{allowance}}
+
+Give each day an `estimatedSpend`: what that day costs for food, local transport and
+activities. Not flights or accommodation — those are counted separately.
+
 ## Say when you are uncertain
 
 You are working from general knowledge, not live data. Opening hours change, venues close,

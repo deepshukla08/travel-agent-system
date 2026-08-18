@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { createApp } from "../src/index.js";
 import { setGenerate, resetGenerate, type Generate } from "../src/agents/model.js";
+import { requestFromIntentPrompt } from "./support.js";
 import {
   BudgetResultSchema,
   DestinationResultSchema,
@@ -23,12 +24,15 @@ const stub: Generate = (async (
 ) => {
   const call = (data: unknown) => ({ data, model: "stub", ms: 1 });
 
+
   if (schema === DestinationResultSchema) {
     return call({
       suggestions: [
         {
           name: "Lisbon",
           country: "Portugal",
+          legs: [{ place: "Lisbon", nights: 5, note: "one base" }],
+          suggestedDays: 5,
           justification:
             "Warm in May, inside Europe, walkable, with the food markets they asked for and inside budget.",
           constraintChecks: [{ kind: "climate", passes: true, reason: "22C" }],
@@ -47,6 +51,7 @@ const stub: Generate = (async (
         afternoon: "tram",
         evening: "dinner",
         travelNotes: "all on foot",
+        estimatedSpend: 40,
         uncertain: false,
         uncertaintyReason: null,
       })),
@@ -114,7 +119,11 @@ test("POST /api/plan streams plan, agent and done events in order", async () => 
     const names = events.map((e) => e.name);
 
     // The routing decision must arrive before any agent, so the UI can show it.
-    assert.equal(names[0], "plan");
+    // Not necessarily first — the intent step reports itself ahead of it.
+    assert.ok(
+      names.indexOf("plan") < names.indexOf("agent"),
+      "the route is published before any agent starts",
+    );
     assert.equal(names.at(-1), "done");
     assert.deepEqual(
       names.filter((n) => n === "agent").length,
@@ -122,7 +131,7 @@ test("POST /api/plan streams plan, agent and done events in order", async () => 
       "one event per agent that ran",
     );
 
-    const plan = events[0]!.data as { route: string[] };
+    const plan = events.find((e) => e.name === "plan")!.data as { route: string[] };
     assert.deepEqual(plan.route, ["destination", "itinerary", "budget"]);
 
     const done = events.at(-1)!.data as { runId: string; answer: string };
@@ -157,78 +166,39 @@ test("the answer arrives as token events before done, and matches it", async () 
   });
 });
 
-test("a follow-up carries the earlier turns into the routing decision", async () => {
-  await withServer(async (base) => {
-    const response = await fetch(`${base}/api/plan`, {
+/** Post a turn and return the parse event plus the terminal payload. */
+async function turn(
+  base: string,
+  body: Record<string, unknown>,
+): Promise<{
+  constraints: {
+    origin: string | null;
+    destination: string | null;
+    days: number | null;
+    travellers: number | null;
+    budget: { currency: string | null; max: number } | null;
+    interests: string[];
+  };
+  route: string[];
+  conversationId: string;
+}> {
+  const events = await readSSE(
+    await fetch(`${base}/api/plan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        request: "make it cheaper",
-        history: ["plan 5 days in Lisbon for 2 people"],
-      }),
-    });
+      body: JSON.stringify(body),
+    }),
+  );
 
-    const events = await readSSE(response);
-    const plan = events[0]!.data as {
-      route: string[];
-      constraints: { days: number; destination: string; travellers: number };
-    };
+  // Find it rather than index it: the intent event now arrives first.
+  const plan = events.find((e) => e.name === "plan")!.data as {
+    constraints: never;
+    route: string[];
+  };
+  const done = events.at(-1)!.data as { conversationId: string };
 
-    // "make it cheaper" on its own parses to nothing and would route to all three.
-    // With the thread it is a cost question about a trip whose shape is known.
-    assert.ok(plan.route.includes("budget"));
-    assert.ok(!plan.route.includes("destination"), "the destination is settled");
-    assert.equal(plan.constraints.destination, "Lisbon");
-    assert.equal(plan.constraints.days, 5);
-    assert.equal(plan.constraints.travellers, 2);
-  });
-});
-
-test("every turn of a chat is stored against one conversation", async () => {
-  await withServer(async (base) => {
-    const ask = (body: Record<string, unknown>) =>
-      fetch(`${base}/api/plan`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-    const first = await readSSE(await ask({ request: "plan 4 days in Lisbon" }));
-    const one = first.at(-1)!.data as { runId: string; conversationId: string };
-    assert.ok(one.conversationId, "the server mints an id on the first turn");
-
-    const second = await readSSE(
-      await ask({
-        request: "make it cheaper",
-        history: ["plan 4 days in Lisbon"],
-        conversationId: one.conversationId,
-      }),
-    );
-    const two = second.at(-1)!.data as { runId: string; conversationId: string };
-
-    // Separate runs — each is independently auditable — but one conversation.
-    assert.notEqual(two.runId, one.runId);
-    assert.equal(two.conversationId, one.conversationId);
-
-    const chat = (await (
-      await fetch(`${base}/api/plan/conversation/${one.conversationId}`)
-    ).json()) as { turns: { id: string; request: string }[] };
-
-    assert.equal(chat.turns.length, 2, "both turns belong to the chat");
-    // Oldest first, so the thread reads in the order it was run.
-    assert.equal(chat.turns[0]!.request, "plan 4 days in Lisbon");
-    assert.equal(chat.turns[1]!.request, "make it cheaper");
-  });
-});
-
-test("an unknown conversation is a 404", async () => {
-  await withServer(async (base) => {
-    const response = await fetch(
-      `${base}/api/plan/conversation/11111111-1111-1111-1111-111111111111`,
-    );
-    assert.equal(response.status, 404);
-  });
-});
+  return { ...plan, conversationId: done.conversationId };
+}
 
 test("a cost-only request streams exactly one agent event", async () => {
   await withServer(async (base) => {
@@ -276,14 +246,16 @@ test("the run and its agent rows are persisted and readable", async () => {
       "itinerary",
       "budget",
     ]);
+    const specialists = run.agents;
+
     // One audit row per agent, recording which model served it.
-    assert.equal(run.agents.length, 3);
-    assert.ok(run.agents.every((a) => a.model === "stub" && a.ok === 1));
+    assert.equal(specialists.length, 3);
+    assert.ok(specialists.every((a) => a.model === "stub" && a.ok === 1));
 
     // Each agent's own output is stored, not just the final prose — otherwise a
     // run cannot be inspected after the fact.
     assert.ok(
-      run.agents.every((a) => a.output && a.output !== "null"),
+      specialists.every((a) => a.output && a.output !== "null"),
       "every agent row must carry its output",
     );
 
@@ -300,15 +272,39 @@ test("an unknown run id is a 404, not a 500", async () => {
   });
 });
 
-test("a too-short request is rejected with 400", async () => {
+test("an empty request is rejected with 400", async () => {
   await withServer(async (base) => {
     const response = await fetch(`${base}/api/plan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ request: "hi" }),
+      body: JSON.stringify({ request: "   " }),
     });
 
     assert.equal(response.status, 400);
+  });
+});
+
+test("a short or nonsense message gets the form, not a validation error", async () => {
+  await withServer(async (base) => {
+    // Typing "?" used to surface a raw zod message in the chat. There is nothing
+    // to plan from, so the right reply is the same one any vague request gets.
+    const response = await fetch(`${base}/api/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "?" }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const events = await readSSE(response);
+    const done = events.at(-1)!.data as { needs: { id: string }[] };
+
+    assert.ok(done.needs.length > 0, "it should ask rather than fail");
+    assert.equal(
+      events.filter((e) => e.name === "agent").length,
+      0,
+      "and spend no model calls doing it",
+    );
   });
 });
 
