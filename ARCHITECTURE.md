@@ -3,15 +3,14 @@
 ## Provisioning
 
 Bicep modules, deployed per environment through GitHub Actions with OIDC federated
-credentials, so no cloud secrets are stored in CI.
+credentials, so no cloud secrets sit in CI.
 
 ## Compute
 
 **Azure Container Apps** for the API. A run holds an SSE connection open for 30–90 seconds,
-which rules out Functions' consumption timeouts. Scale on the KEDA HTTP concurrency rule at
-roughly 40 in-flight requests per replica — 500 concurrent runs means about 12–15 replicas —
-with `minReplicas: 2` so nobody pays a cold start. The frontend is a **Static Web App** on
-the global CDN.
+which rules out Functions' consumption timeouts. Scale on KEDA HTTP concurrency at roughly 40
+in-flight requests per replica — 500 concurrent runs is about 12–15 replicas — with
+`minReplicas: 2` so nobody pays a cold start. The frontend is a **Static Web App** on the CDN.
 
 The real ceiling is model throughput, not CPU. Past a few hundred concurrent runs I would put
 requests on a **Service Bus** queue, return a run id immediately, and stream progress from a
